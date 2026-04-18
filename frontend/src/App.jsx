@@ -14,7 +14,7 @@ export default function App() {
   const [lastRun]         = useState(new Date())
   const qc                = useQueryClient()
 
-  const { data: positions = [], isLoading } = useQuery('positions', fetchPositions)
+  const { data: positions = [], isLoading, isError: posError } = useQuery('positions', fetchPositions)
 
   async function handleModeChange() {
     const { data: settings } = await import('./api/client').then(m => ({ data: null }))
@@ -81,6 +81,10 @@ export default function App() {
                 {[...Array(3)].map((_, i) => (
                   <div key={i} className="bg-card border border-border rounded-xl h-52 animate-pulse" />
                 ))}
+              </div>
+            ) : posError ? (
+              <div className="bg-card border border-red-500/30 rounded-xl p-12 text-center text-red-400 text-sm">
+                Failed to load positions — check backend logs.
               </div>
             ) : positions.length === 0 ? (
               <div className="bg-card border border-border rounded-xl p-12 text-center text-slate-500">
