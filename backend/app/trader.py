@@ -26,8 +26,7 @@ async def run_monitor(db: Session):
 
     try:
         clock = alp.get_clock(mode)
-        if not clock.is_open:
-            return {"status": "market_closed"}
+        market_open = clock.is_open
 
         acct      = alp.get_account(mode)
         positions = alp.get_positions(mode)
@@ -49,7 +48,7 @@ async def run_monitor(db: Session):
 
             if signal == "NO_SETUP":
                 stage2_lost.append(sym)
-                if auto_execute:
+                if auto_execute and market_open:
                     try:
                         alp.close_position(sym, mode)
                         _log_trade(db, sym, "SELL", qty, result.get("price") or 0, "STAGE2_LOST", mode)
@@ -66,7 +65,7 @@ async def run_monitor(db: Session):
         watchlist    = _get_watchlist(db)
         max_pos      = int(get_setting(db, "max_positions", "10"))
 
-        if auto_execute and len(positions) < max_pos:
+        if auto_execute and market_open and len(positions) < max_pos:
             for sym in watchlist:
                 if sym in held_symbols:
                     continue
@@ -97,6 +96,7 @@ async def run_monitor(db: Session):
         return {
             "status": "ok",
             "mode": mode,
+            "market_open": market_open,
             "portfolio": portfolio,
             "day_pnl": day_pnl,
             "stage2_lost": stage2_lost,
