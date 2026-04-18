@@ -45,8 +45,6 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       SECRET_KEY: ${SECRET_KEY}
-    volumes:
-      - ./backend:/app
     networks:
       - internal
       - npm_network
