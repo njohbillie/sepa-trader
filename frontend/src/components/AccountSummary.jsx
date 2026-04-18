@@ -16,9 +16,14 @@ function fmt(n, sign=false) {
 }
 
 export default function AccountSummary({ onModeChange }) {
-  const { data, isLoading } = useQuery('account', fetchAccount)
+  const { data, isLoading, isError } = useQuery('account', fetchAccount)
 
   if (isLoading) return <div className="bg-card rounded-xl p-6 animate-pulse h-28" />
+  if (isError || !data) return (
+    <div className="bg-card border border-red-500/30 rounded-xl p-6 text-red-400 text-sm">
+      Unable to reach Alpaca API — check your credentials in <code>.env</code> and restart the backend.
+    </div>
+  )
 
   const pnlColor = data.day_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
 
