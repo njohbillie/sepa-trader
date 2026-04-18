@@ -24,7 +24,7 @@ services:
       - redis_data:/data
 
   backend:
-    build: ./backend
+    image: njohbillie/sepa-trader-backend:latest
     restart: unless-stopped
     depends_on:
       db:
@@ -47,7 +47,7 @@ services:
       - "8000:8000"
 
   frontend:
-    build: ./frontend
+    image: njohbillie/sepa-trader-frontend:latest
     restart: unless-stopped
     depends_on:
       - backend
