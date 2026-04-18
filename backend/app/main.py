@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .scheduler import start_scheduler, stop_scheduler
-from .routes import account, positions, orders, signals, settings
+from .routes import account, positions, orders, signals, settings, webhook
 
 
 @asynccontextmanager
@@ -26,6 +26,7 @@ app.include_router(positions.router)
 app.include_router(orders.router)
 app.include_router(signals.router)
 app.include_router(settings.router)
+app.include_router(webhook.router)
 
 
 @app.get("/health")
