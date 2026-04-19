@@ -5,9 +5,10 @@ import AccountSummary from './components/AccountSummary'
 import PositionCard from './components/PositionCard'
 import { OpenOrdersTable, TradeHistoryTable } from './components/OrdersTable'
 import SettingsPanel from './components/SettingsPanel'
+import WeeklyPlan from './components/WeeklyPlan'
 import { fetchPositions, updateSetting, fetchSettings } from './api/client'
 
-const TABS = ['Positions', 'Orders', 'History', 'Settings']
+const TABS = ['Positions', 'Orders', 'History', 'Weekly Plan', 'Settings']
 
 export default function App() {
   const [tab, setTab]     = useState('Positions')
@@ -98,9 +99,10 @@ export default function App() {
           </div>
         )}
 
-        {tab === 'Orders'   && <OpenOrdersTable />}
-        {tab === 'History'  && <TradeHistoryTable />}
-        {tab === 'Settings' && <SettingsPanel />}
+        {tab === 'Orders'      && <OpenOrdersTable />}
+        {tab === 'History'     && <TradeHistoryTable />}
+        {tab === 'Weekly Plan' && <WeeklyPlan />}
+        {tab === 'Settings'    && <SettingsPanel />}
       </main>
     </div>
   )
