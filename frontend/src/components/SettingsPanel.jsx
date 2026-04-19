@@ -8,6 +8,7 @@ const FIELDS = [
   { key: 'stop_loss_pct',  label: 'Stop Loss %',      type: 'number' },
   { key: 'max_positions',  label: 'Max Positions',    type: 'number' },
   { key: 'watchlist',      label: 'Watchlist (CSV)',  type: 'text'   },
+  { key: 'webhook_secret', label: 'Webhook Secret',   type: 'text'   },
 ]
 
 export default function SettingsPanel() {
