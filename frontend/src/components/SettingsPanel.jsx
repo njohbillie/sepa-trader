@@ -3,12 +3,13 @@ import { useQuery, useQueryClient } from 'react-query'
 import { fetchSettings, updateSetting } from '../api/client'
 
 const FIELDS = [
-  { key: 'auto_execute',   label: 'Auto Execute',     type: 'toggle' },
-  { key: 'risk_pct',       label: 'Risk per Trade %', type: 'number' },
-  { key: 'stop_loss_pct',  label: 'Stop Loss %',      type: 'number' },
-  { key: 'max_positions',  label: 'Max Positions',    type: 'number' },
-  { key: 'watchlist',      label: 'Watchlist (CSV)',  type: 'text'   },
-  { key: 'webhook_secret', label: 'Webhook Secret',   type: 'text'   },
+  { key: 'auto_execute',      label: 'Auto Execute',            type: 'toggle' },
+  { key: 'risk_pct',          label: 'Risk per Trade %',        type: 'number' },
+  { key: 'stop_loss_pct',     label: 'Stop Loss %',             type: 'number' },
+  { key: 'max_positions',     label: 'Max Positions',           type: 'number' },
+  { key: 'watchlist',         label: 'Watchlist (CSV)',         type: 'text'   },
+  { key: 'screener_universe', label: 'Screener Universe (CSV)', type: 'text'   },
+  { key: 'webhook_secret',    label: 'Webhook Secret',          type: 'text'   },
 ]
 
 export default function SettingsPanel() {
