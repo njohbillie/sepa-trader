@@ -119,8 +119,12 @@ def place_oca_exit(
     mode: str = "paper",
 ):
     """
-    Place a single OCO (One-Cancels-Other) sell for an existing position.
-    Limit sell at target + stop sell at stop. When one fills, Alpaca cancels the other.
+    Place a single OCO (One-Cancels-Other) sell order for an existing position.
+    When one leg fills, Alpaca automatically cancels the other.
+
+    Both stop_loss and take_profit must be passed explicitly as request objects —
+    Alpaca raises code 40010001 if take_profit.limit_price is missing even when
+    limit_price is set on the parent LimitOrderRequest.
     """
     req = LimitOrderRequest(
         symbol=symbol,
@@ -130,6 +134,7 @@ def place_oca_exit(
         limit_price=round(target_price, 2),
         order_class=OrderClass.OCO,
         stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+        take_profit=TakeProfitRequest(limit_price=round(target_price, 2)),  # ← required by Alpaca
     )
     return get_client(mode).submit_order(req)
 
@@ -155,10 +160,11 @@ def cancel_symbol_exit_orders(symbol: str, mode: str = "paper") -> list[str]:
 
     return cancelled
 
+
 def wait_for_orders_cancelled(
     symbol: str,
     mode: str = "paper",
-    timeout: float = 5.0,
+    timeout: float = 6.0,
     poll_interval: float = 0.4,
 ) -> bool:
     """
@@ -167,24 +173,25 @@ def wait_for_orders_cancelled(
     Used after cancel_symbol_exit_orders() to ensure Alpaca has fully
     processed the cancellation before placing a replacement OCO.
     """
-    import time as _time
     elapsed = 0.0
     while elapsed < timeout:
-        open_orders = get_open_orders_by_symbol(mode)
+        open_orders   = get_open_orders_by_symbol(mode)
         symbol_orders = open_orders.get(symbol, [])
-        sell_orders = [
+        sell_orders   = [
             o for o in symbol_orders
             if 'sell' in str(getattr(o, 'side', '') or '').lower()
         ]
         if not sell_orders:
             return True
-        _time.sleep(poll_interval)
+        time.sleep(poll_interval)
         elapsed += poll_interval
+
     logger.warning(
         "wait_for_orders_cancelled: timeout after %.1fs — sell orders still open for %s",
         timeout, symbol,
     )
     return False
+
 
 def replace_oca_exit(
     symbol: str,
@@ -194,16 +201,21 @@ def replace_oca_exit(
     mode: str = "paper",
 ):
     """
-    Cancel existing exit orders for a symbol and place a fresh OCO with an
-    updated stop price. Used by the trailing stop logic to ratchet stops upward.
+    Cancel existing exit orders for a symbol and place a fresh OCO with
+    updated stop/target prices. Used by the trailing stop logic and the
+    exit guard when plan prices change.
 
-    Alpaca does not support modifying existing OCO legs in-place — cancel+replace
-    is the correct pattern.
+    Polls until cancellation is confirmed before placing the new order —
+    avoids Alpaca rejecting the replacement as an oversell.
     """
     cancelled = cancel_symbol_exit_orders(symbol, mode)
     if cancelled:
-        # Brief pause so Alpaca fully processes the cancellation before the new order
-        time.sleep(0.5)
+        cleared = wait_for_orders_cancelled(symbol, mode, timeout=6.0, poll_interval=0.4)
+        if not cleared:
+            logger.warning(
+                "replace_oca_exit: proceeding despite timeout — "
+                "cancellation may not be fully settled for %s", symbol,
+            )
 
     return place_oca_exit(symbol, qty, new_stop, target_price, mode)
 
