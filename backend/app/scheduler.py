@@ -18,7 +18,6 @@ async def _monitor_job():
     db = SessionLocal()
     try:
         await run_monitor(db)
-        # Detect closed positions and optionally refill slots / run Claude analysis
         from .position_manager import check_post_close
         check_post_close(db)
     finally:
@@ -48,7 +47,7 @@ async def _screener_watchdog():
         if get_setting(db, "screener_auto_run", "true") != "true":
             return
 
-        day_setting  = int(get_setting(db, "screener_schedule_day",  "6"))   # 0=Mon…6=Sun
+        day_setting  = int(get_setting(db, "screener_schedule_day",  "6"))
         time_setting = get_setting(db, "screener_schedule_time", "20:00")
 
         now_et = datetime.now(_ET)
@@ -62,10 +61,10 @@ async def _screener_watchdog():
         if now_et.hour != h or now_et.minute != m:
             return
 
-        # Prevent double-run within the same minute
         run_key = now_et.strftime("%Y-%m-%d %H:%M")
         if get_setting(db, "screener_last_auto_run", "") == run_key:
             return
+
         set_setting(db, "screener_last_auto_run", run_key)
         set_setting(db, "screener_status", "running")
         set_setting(db, "screener_error",  "")
@@ -74,7 +73,6 @@ async def _screener_watchdog():
     finally:
         db.close()
 
-    # Run screener in a fresh session (can take 5–30s)
     db2 = SessionLocal()
     try:
         from .screener import run_screener
@@ -96,13 +94,20 @@ async def _screener_watchdog():
 
 
 def start_scheduler():
-    # Hourly monitor Mon-Fri during market hours (9:30–16:00 ET)
+    # Every 30 minutes Mon-Fri during market hours (9:00–15:30 ET)
+    # Fires at :00 and :30 of each hour — covers 9:30 open through 15:30
     scheduler.add_job(
         _monitor_job,
-        CronTrigger(day_of_week="mon-fri", hour="9-15", minute="30,0", timezone="America/New_York"),
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour="9-15",
+            minute="*/30",
+            timezone="America/New_York",
+        ),
         id="sepa_monitor",
         replace_existing=True,
     )
+
     # Monday 9:35 AM ET — fill position slots from the weekly plan
     scheduler.add_job(
         _monday_open_job,
@@ -110,14 +115,15 @@ def start_scheduler():
         id="monday_open",
         replace_existing=True,
     )
-    # Watchdog checks every minute whether it's time to run the screener.
-    # Schedule day/time are read from DB settings so changes take effect immediately.
+
+    # Watchdog checks every minute whether it's time to run the screener
     scheduler.add_job(
         _screener_watchdog,
         CronTrigger(minute="*"),
         id="screener_watchdog",
         replace_existing=True,
     )
+
     scheduler.start()
 
 

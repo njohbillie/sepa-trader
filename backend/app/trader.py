@@ -1,6 +1,8 @@
 """
 Auto-execution engine: fires trades based on SEPA signals.
-Pre-trade AI gate runs before every buy order.
+- Every 30-minute cycle: trailing stop adjustment + signal evaluation
+- Pre-trade AI gate runs before every buy order
+- Exit guard ensures every position has an OCO at all times
 """
 import asyncio
 import logging
@@ -40,67 +42,163 @@ def _get_weekly_plan_exits(db: Session, symbol: str, mode: str) -> tuple[float, 
     return float(row[0] or 0), float(row[1] or 0)
 
 
-def _gate(
-    db: Session,
-    symbol: str,
-    qty: float,
+def _get_current_stop_price(orders: list) -> float | None:
+    """
+    Extract the active stop price from an open OCO/bracket order's stop leg.
+    Returns None if no stop leg is found.
+    """
+    for o in orders:
+        order_class = str(getattr(o, 'order_class', '') or '').lower()
+        side        = str(getattr(o, 'side',        '') or '').lower()
+
+        if 'sell' not in side:
+            continue
+
+        if any(kw in order_class for kw in ('oco', 'bracket', 'oto')):
+            # Check child legs first (OCO structure)
+            legs = getattr(o, 'legs', None) or []
+            for leg in legs:
+                order_type = str(getattr(leg, 'type', '') or '').lower()
+                if 'stop' in order_type:
+                    sp = getattr(leg, 'stop_price', None)
+                    if sp is not None:
+                        return float(sp)
+            # Fallback: stop_price on the parent order itself
+            sp = getattr(o, 'stop_price', None)
+            if sp is not None:
+                return float(sp)
+
+    return None
+
+
+# ── Trailing stop logic ───────────────────────────────────────────────────────
+
+# R-based tiers for stop ratcheting.
+# Only applied when position is green — never touches red positions.
+#
+# Tier 1 — gain >= 1R:  move stop to breakeven (entry)
+# Tier 2 — gain >= 2R:  move stop to entry + 1R (lock in 1R profit)
+# Tier 3 — gain >= 3R:  trail stop at current_price - 1R (dynamic trailing)
+#
+# The stop only ever moves UP — never down.
+_TRAIL_TIERS = [
+    (3.0, lambda entry, R, price: price - R),           # trail 1R below current
+    (2.0, lambda entry, R, price: entry + R),           # lock in 1R
+    (1.0, lambda entry, R, price: entry),               # breakeven
+]
+
+# Minimum improvement before replacing — avoids unnecessary API calls
+# for tiny stop moves (< 0.5% of current stop)
+_MIN_STOP_IMPROVEMENT_PCT = 0.005
+
+
+def _compute_new_stop(
     entry: float,
-    stop: float,
-    target: float,
-    trigger: str,
+    original_stop: float,
+    current_price: float,
+) -> float | None:
+    """
+    Given a position's entry, original stop, and current price,
+    return the new stop level or None if no adjustment is warranted.
+    """
+    R = entry - original_stop
+    if R <= 0:
+        return None
+
+    gain_r = (current_price - entry) / R
+
+    for threshold, fn in _TRAIL_TIERS:
+        if gain_r >= threshold:
+            new_stop = round(fn(entry, R, current_price), 2)
+            # Safety: never set stop within 0.5% of current price (would trigger immediately)
+            max_stop = round(current_price * 0.995, 2)
+            return min(new_stop, max_stop)
+
+    return None  # gain < 1R — no adjustment
+
+
+def _adjust_trailing_stops(
+    db: Session,
+    positions: list,
+    open_orders_by_symbol: dict,
     mode: str,
-) -> bool:
+):
     """
-    Run pre-trade AI analysis. Returns True if order should proceed.
-    Logs result regardless of outcome. Never raises — fails open.
-    """
-    try:
-        from .claude_analyst import pre_trade_analysis, log_pre_trade
-        acct         = alp.get_account(mode)
-        portfolio    = float(acct.portfolio_value)
-        cash         = float(acct.cash)
-        buying_power = float(acct.buying_power)
+    For each green position, ratchet the stop order upward according to
+    R-based tiers. Red positions are left untouched — let the stop do its job.
 
-        result = pre_trade_analysis(
-            db=db,
-            symbol=symbol,
-            side="BUY",
-            qty=qty,
-            entry_price=entry,
-            stop_price=stop,
-            target_price=target,
-            trigger=trigger,
-            portfolio_value=portfolio,
-            cash=cash,
-            buying_power=buying_power,
-            mode=mode,
+    Called at the start of every 30-minute monitor cycle while market is open.
+    Updates weekly_plan.stop_price so the exit guard stays in sync.
+    """
+    for pos in positions:
+        sym           = pos.symbol
+        current_price = float(pos.current_price)
+        entry         = float(pos.avg_entry_price)
+        qty           = float(pos.qty)
+
+        # ── Never touch red positions ────────────────────────────────────────
+        if current_price <= entry:
+            continue
+
+        # Pull original stop and target from plan
+        stop_orig, target = _get_weekly_plan_exits(db, sym, mode)
+        if stop_orig <= 0 or target <= 0:
+            logger.debug("Trailing stop: %s has no plan exits — skipping.", sym)
+            continue
+
+        # Compute what the stop should be at current gain
+        new_stop = _compute_new_stop(entry, stop_orig, current_price)
+        if new_stop is None:
+            continue  # gain < 1R — no adjustment warranted
+
+        # Find the currently active stop price from open orders
+        current_stop = _get_current_stop_price(open_orders_by_symbol.get(sym, []))
+        effective_current = current_stop if current_stop else stop_orig
+
+        # Only update if new stop is meaningfully higher
+        if new_stop <= effective_current * (1 + _MIN_STOP_IMPROVEMENT_PCT):
+            logger.debug(
+                "Trailing stop: %s new=$%.2f vs current=$%.2f — no update needed.",
+                sym, new_stop, effective_current,
+            )
+            continue
+
+        R    = entry - stop_orig
+        gain_r = (current_price - entry) / R
+
+        logger.info(
+            "Trailing stop: %s  gain=%.1fR  price=$%.2f  old_stop=$%.2f → new_stop=$%.2f  target=$%.2f [%s]",
+            sym, gain_r, current_price, effective_current, new_stop, target, mode,
         )
 
-        log_pre_trade(
-            db, symbol, trigger,
-            result["verdict"], result["reason"], result["analysis"], mode,
-        )
+        try:
+            alp.replace_oca_exit(sym, qty, new_stop, target, mode)
 
-        if not result["proceed"]:
-            logger.warning(
-                "Pre-trade gate BLOCKED %s [%s]: %s",
-                symbol, trigger, result["reason"],
+            # Persist updated stop to weekly_plan so exit guard doesn't regress it
+            db.execute(
+                text("""
+                    UPDATE weekly_plan
+                    SET stop_price = :stop
+                    WHERE symbol = :sym
+                      AND mode   = :mode
+                      AND week_start = (
+                          SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
+                      )
+                """),
+                {"stop": new_stop, "sym": sym, "mode": mode},
             )
-            return False
+            db.commit()
 
-        if result["warnings"]:
-            logger.warning(
-                "Pre-trade gate WARNED for %s [%s]: %s",
-                symbol, trigger, ", ".join(result["warnings"]),
+            logger.info(
+                "Trailing stop updated: %s $%.2f → $%.2f (gain=%.1fR) [%s]",
+                sym, effective_current, new_stop, gain_r, mode,
             )
 
-        logger.info("Pre-trade gate PASSED for %s [%s]: %s", symbol, trigger, result["reason"])
-        return True
+        except Exception as exc:
+            logger.error("Trailing stop update failed for %s: %s", sym, exc)
 
-    except Exception as exc:
-        logger.error("Pre-trade gate error for %s: %s — proceeding.", symbol, exc)
-        return True
 
+# ── Exit guard ────────────────────────────────────────────────────────────────
 
 def _classify_exit_orders(open_orders_by_symbol: dict) -> tuple[set[str], dict]:
     oco_covered      = set()
@@ -109,7 +207,7 @@ def _classify_exit_orders(open_orders_by_symbol: dict) -> tuple[set[str], dict]:
     for sym, orders in open_orders_by_symbol.items():
         for o in orders:
             order_class = str(getattr(o, 'order_class', '') or '').lower()
-            side        = str(getattr(o, 'side', '') or '').lower()
+            side        = str(getattr(o, 'side',        '') or '').lower()
             is_sell     = 'sell' in side
             is_oco      = any(kw in order_class for kw in ('oco', 'bracket', 'oto'))
 
@@ -128,6 +226,11 @@ def _ensure_exit_orders(
     open_orders_by_symbol: dict,
     mode: str,
 ):
+    """
+    Ensure every live position has an active OCO exit order.
+    Cancels orphaned standalone sell orders and places fresh OCOs where missing.
+    Runs AFTER trailing stop adjustment so it sees the updated orders map.
+    """
     oco_covered, orphan_order_ids = _classify_exit_orders(open_orders_by_symbol)
     client = alp.get_client(mode)
 
@@ -148,8 +251,8 @@ def _ensure_exit_orders(
 
         if stop <= 0 or target <= 0:
             logger.warning(
-                "Exit guard: %s has no OCO exit but weekly plan has no stop/target [%s] "
-                "— skipping. Use 'Set Stop / Target' on the position card.", sym, mode
+                "Exit guard: %s has no OCO but no stop/target in plan [%s] "
+                "— use 'Set Stop / Target' on the position card.", sym, mode,
             )
             continue
 
@@ -162,6 +265,52 @@ def _ensure_exit_orders(
         except Exception as exc:
             logger.error("Exit guard: failed to place OCO for %s: %s", sym, exc)
 
+
+# ── Pre-trade gate ────────────────────────────────────────────────────────────
+
+def _gate(
+    db: Session,
+    symbol: str,
+    qty: float,
+    entry: float,
+    stop: float,
+    target: float,
+    trigger: str,
+    mode: str,
+) -> bool:
+    """Pre-trade AI gate. Returns True if order should proceed. Fails open."""
+    try:
+        from .claude_analyst import pre_trade_analysis, log_pre_trade
+        acct         = alp.get_account(mode)
+        portfolio    = float(acct.portfolio_value)
+        cash         = float(acct.cash)
+        buying_power = float(acct.buying_power)
+
+        result = pre_trade_analysis(
+            db=db, symbol=symbol, side="BUY", qty=qty,
+            entry_price=entry, stop_price=stop, target_price=target,
+            trigger=trigger, portfolio_value=portfolio,
+            cash=cash, buying_power=buying_power, mode=mode,
+        )
+        log_pre_trade(
+            db, symbol, trigger,
+            result["verdict"], result["reason"], result["analysis"], mode,
+        )
+
+        if not result["proceed"]:
+            logger.warning("Pre-trade gate BLOCKED %s [%s]: %s", symbol, trigger, result["reason"])
+            return False
+        if result["warnings"]:
+            logger.warning("Pre-trade gate WARNED %s [%s]: %s", symbol, trigger, ", ".join(result["warnings"]))
+        logger.info("Pre-trade gate PASSED %s [%s]: %s", symbol, trigger, result["reason"])
+        return True
+
+    except Exception as exc:
+        logger.error("Pre-trade gate error for %s: %s — proceeding.", symbol, exc)
+        return True
+
+
+# ── Main monitor ──────────────────────────────────────────────────────────────
 
 async def run_monitor(db: Session):
     mode         = get_setting(db, "trading_mode", "paper")
@@ -178,15 +327,26 @@ async def run_monitor(db: Session):
         portfolio = float(acct.portfolio_value)
         day_pnl   = float(acct.equity) - float(acct.last_equity)
 
-        # ── Exit guard ────────────────────────────────────────────────────────
-        if market_open:
+        if market_open and positions:
             try:
                 open_orders_by_symbol = alp.get_open_orders_by_symbol(mode)
-                _ensure_exit_orders(db, positions, open_orders_by_symbol, mode)
-            except Exception as exc:
-                logger.error("Exit guard failed: %s", exc)
-        # ─────────────────────────────────────────────────────────────────────
 
+                # ── Step 1: Trailing stop adjustment ─────────────────────────
+                # Green positions get their stops ratcheted up.
+                # Red positions are untouched — let the original stop do its job.
+                _adjust_trailing_stops(db, positions, open_orders_by_symbol, mode)
+
+                # Re-fetch open orders after potential cancel+replace from trailing stops
+                open_orders_by_symbol = alp.get_open_orders_by_symbol(mode)
+
+                # ── Step 2: Exit guard ────────────────────────────────────────
+                # Ensure every position still has an active OCO after the stop adjustments
+                _ensure_exit_orders(db, positions, open_orders_by_symbol, mode)
+
+            except Exception as exc:
+                logger.error("Stop management cycle failed: %s", exc)
+
+        # ── Step 3: Signal evaluation ─────────────────────────────────────────
         stage2_lost   = []
         new_breakouts = []
         results       = []
@@ -212,7 +372,7 @@ async def run_monitor(db: Session):
 
             results.append({"sym": sym, "signal": signal})
 
-        # Watchlist breakout entries
+        # ── Step 4: Watchlist breakout entries ────────────────────────────────
         held_symbols = {p.symbol for p in positions}
         watchlist    = _get_watchlist(db)
         max_pos      = int(get_setting(db, "max_positions", "10"))
@@ -231,12 +391,9 @@ async def run_monitor(db: Session):
                     stop, target = _get_weekly_plan_exits(db, sym, mode)
 
                     if qty >= 1:
-                        # ── Pre-trade AI gate ──────────────────────────────
                         if not _gate(db, sym, qty, price, stop, target, "BREAKOUT", mode):
                             results.append({"sym": sym, "action": "BLOCKED_BY_AI"})
                             continue
-                        # ──────────────────────────────────────────────────
-
                         try:
                             if stop > 0 and target > 0:
                                 alp.place_bracket_buy(sym, qty, stop, target, mode)

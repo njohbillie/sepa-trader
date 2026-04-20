@@ -8,6 +8,10 @@ from alpaca.trading.requests import (
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass
 from .config import settings
+import logging
+import time
+
+logger = logging.getLogger(__name__)
 
 _clients: dict[str, TradingClient] = {}
 
@@ -91,9 +95,8 @@ def place_bracket_buy(
 ):
     """
     Market buy with attached stop-loss and take-profit legs (bracket/OCA).
-    - Entry leg: DAY (required by Alpaca for market bracket entries)
-    - Stop and target legs: GTC — remain active until one fills or position is closed
-    - When one exit leg fills, Alpaca automatically cancels the other
+    Entry leg: DAY (required by Alpaca for market bracket entries).
+    Stop and target legs: GTC — remain active until one fills or position is closed.
     Use this for NEW entries only. For existing positions use place_oca_exit().
     """
     req = MarketOrderRequest(
@@ -116,12 +119,8 @@ def place_oca_exit(
     mode: str = "paper",
 ):
     """
-    Place a single OCO (One-Cancels-Other) sell order for an existing position.
-    Creates a limit sell (take profit) and stop sell (stop loss) as linked legs.
-    When one fills, Alpaca automatically cancels the other.
-
-    Using OCO instead of two independent orders avoids Alpaca rejecting the
-    second order for exceeding position size.
+    Place a single OCO (One-Cancels-Other) sell for an existing position.
+    Limit sell at target + stop sell at stop. When one fills, Alpaca cancels the other.
     """
     req = LimitOrderRequest(
         symbol=symbol,
@@ -133,6 +132,50 @@ def place_oca_exit(
         stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
     )
     return get_client(mode).submit_order(req)
+
+
+def cancel_symbol_exit_orders(symbol: str, mode: str = "paper") -> list[str]:
+    """
+    Cancel all open sell orders for a symbol (OCO, bracket, or standalone).
+    Returns list of cancelled order IDs.
+    """
+    client      = get_client(mode)
+    open_orders = get_open_orders_by_symbol(mode)
+    cancelled   = []
+
+    for o in open_orders.get(symbol, []):
+        side = str(getattr(o, 'side', '') or '').lower()
+        if 'sell' in side:
+            try:
+                client.cancel_order_by_id(str(o.id))
+                cancelled.append(str(o.id))
+                logger.debug("Cancelled exit order %s for %s [%s]", o.id, symbol, mode)
+            except Exception as exc:
+                logger.warning("Could not cancel order %s for %s: %s", o.id, symbol, exc)
+
+    return cancelled
+
+
+def replace_oca_exit(
+    symbol: str,
+    qty: float,
+    new_stop: float,
+    target_price: float,
+    mode: str = "paper",
+):
+    """
+    Cancel existing exit orders for a symbol and place a fresh OCO with an
+    updated stop price. Used by the trailing stop logic to ratchet stops upward.
+
+    Alpaca does not support modifying existing OCO legs in-place — cancel+replace
+    is the correct pattern.
+    """
+    cancelled = cancel_symbol_exit_orders(symbol, mode)
+    if cancelled:
+        # Brief pause so Alpaca fully processes the cancellation before the new order
+        time.sleep(0.5)
+
+    return place_oca_exit(symbol, qty, new_stop, target_price, mode)
 
 
 def close_position(symbol: str, mode: str = "paper"):
