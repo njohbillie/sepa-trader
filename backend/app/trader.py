@@ -1,6 +1,6 @@
 """
 Auto-execution engine: fires trades based on SEPA signals.
-Position sizing: (portfolio * risk_pct/100) / (entry_price * stop_loss_pct/100)
+Pre-trade AI gate runs before every buy order.
 """
 import asyncio
 import logging
@@ -23,11 +23,7 @@ def _size_position(portfolio_value: float, price: float, risk_pct: float, stop_p
 
 
 def _get_weekly_plan_exits(db: Session, symbol: str, mode: str) -> tuple[float, float]:
-    """
-    Return (stop_price, target1) for a symbol from the most recent weekly plan
-    for the given mode. Falls back to historical if not in current week.
-    Returns (0.0, 0.0) if no record found.
-    """
+    """Return (stop_price, target1) — most recent plan row for this symbol+mode."""
     row = db.execute(
         text("""
             SELECT stop_price, target1
@@ -44,12 +40,69 @@ def _get_weekly_plan_exits(db: Session, symbol: str, mode: str) -> tuple[float, 
     return float(row[0] or 0), float(row[1] or 0)
 
 
+def _gate(
+    db: Session,
+    symbol: str,
+    qty: float,
+    entry: float,
+    stop: float,
+    target: float,
+    trigger: str,
+    mode: str,
+) -> bool:
+    """
+    Run pre-trade AI analysis. Returns True if order should proceed.
+    Logs result regardless of outcome. Never raises — fails open.
+    """
+    try:
+        from .claude_analyst import pre_trade_analysis, log_pre_trade
+        acct         = alp.get_account(mode)
+        portfolio    = float(acct.portfolio_value)
+        cash         = float(acct.cash)
+        buying_power = float(acct.buying_power)
+
+        result = pre_trade_analysis(
+            db=db,
+            symbol=symbol,
+            side="BUY",
+            qty=qty,
+            entry_price=entry,
+            stop_price=stop,
+            target_price=target,
+            trigger=trigger,
+            portfolio_value=portfolio,
+            cash=cash,
+            buying_power=buying_power,
+            mode=mode,
+        )
+
+        log_pre_trade(
+            db, symbol, trigger,
+            result["verdict"], result["reason"], result["analysis"], mode,
+        )
+
+        if not result["proceed"]:
+            logger.warning(
+                "Pre-trade gate BLOCKED %s [%s]: %s",
+                symbol, trigger, result["reason"],
+            )
+            return False
+
+        if result["warnings"]:
+            logger.warning(
+                "Pre-trade gate WARNED for %s [%s]: %s",
+                symbol, trigger, ", ".join(result["warnings"]),
+            )
+
+        logger.info("Pre-trade gate PASSED for %s [%s]: %s", symbol, trigger, result["reason"])
+        return True
+
+    except Exception as exc:
+        logger.error("Pre-trade gate error for %s: %s — proceeding.", symbol, exc)
+        return True
+
+
 def _classify_exit_orders(open_orders_by_symbol: dict) -> tuple[set[str], dict]:
-    """
-    Inspect open orders per symbol and return:
-      - oco_covered:      symbols with a proper OCO or bracket exit in place
-      - orphan_order_ids: symbol -> [order_ids] for standalone sells to cancel
-    """
     oco_covered      = set()
     orphan_order_ids = {}
 
@@ -57,14 +110,12 @@ def _classify_exit_orders(open_orders_by_symbol: dict) -> tuple[set[str], dict]:
         for o in orders:
             order_class = str(getattr(o, 'order_class', '') or '').lower()
             side        = str(getattr(o, 'side', '') or '').lower()
-
-            is_sell = 'sell' in side
-            is_oco  = any(kw in order_class for kw in ('oco', 'bracket', 'oto'))
+            is_sell     = 'sell' in side
+            is_oco      = any(kw in order_class for kw in ('oco', 'bracket', 'oto'))
 
             if is_sell and is_oco:
                 oco_covered.add(sym)
                 break
-
             if is_sell and not is_oco:
                 orphan_order_ids.setdefault(sym, []).append(str(o.id))
 
@@ -77,30 +128,22 @@ def _ensure_exit_orders(
     open_orders_by_symbol: dict,
     mode: str,
 ):
-    """
-    For every live position without a proper OCO exit:
-      1. Cancel orphaned standalone sell orders
-      2. Look up stop/target from the mode-scoped weekly plan
-      3. Place a fresh OCO exit order
-    """
     oco_covered, orphan_order_ids = _classify_exit_orders(open_orders_by_symbol)
     client = alp.get_client(mode)
 
     for pos in positions:
         sym = pos.symbol
-
         if sym in oco_covered:
             continue
 
-        orphans = orphan_order_ids.get(sym, [])
-        for oid in orphans:
+        for oid in orphan_order_ids.get(sym, []):
             try:
                 client.cancel_order_by_id(oid)
-                logger.info("Exit guard: cancelled orphaned sell order %s for %s [%s]", oid, sym, mode)
+                logger.info("Exit guard: cancelled orphaned sell %s for %s [%s]", oid, sym, mode)
             except Exception as exc:
-                logger.warning("Exit guard: could not cancel order %s for %s: %s", oid, sym, exc)
+                logger.warning("Exit guard: could not cancel %s for %s: %s", oid, sym, exc)
 
-        qty        = float(pos.qty)
+        qty          = float(pos.qty)
         stop, target = _get_weekly_plan_exits(db, sym, mode)
 
         if stop <= 0 or target <= 0:
@@ -113,11 +156,11 @@ def _ensure_exit_orders(
         try:
             alp.place_oca_exit(sym, qty, stop, target, mode)
             logger.info(
-                "Exit guard: placed OCO exit for %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
+                "Exit guard: placed OCO for %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
                 sym, qty, stop, target, mode,
             )
         except Exception as exc:
-            logger.error("Exit guard: failed to place OCO exit for %s: %s", sym, exc)
+            logger.error("Exit guard: failed to place OCO for %s: %s", sym, exc)
 
 
 async def run_monitor(db: Session):
@@ -164,13 +207,12 @@ async def run_monitor(db: Session):
                         _log_trade(db, sym, "SELL", qty, result.get("price") or 0, "STAGE2_LOST", mode)
                     except Exception as e:
                         results.append({"sym": sym, "action": "SELL_FAILED", "error": str(e)})
-
             elif signal == "BREAKOUT":
                 new_breakouts.append(sym)
 
             results.append({"sym": sym, "signal": signal})
 
-        # Check watchlist for new breakout entries
+        # Watchlist breakout entries
         held_symbols = {p.symbol for p in positions}
         watchlist    = _get_watchlist(db)
         max_pos      = int(get_setting(db, "max_positions", "10"))
@@ -184,18 +226,25 @@ async def run_monitor(db: Session):
                 _log_signal(db, sym, signal, result.get("score", 0), result.get("price"), mode)
 
                 if signal == "BREAKOUT" and result.get("price"):
-                    price = result["price"]
-                    qty   = _size_position(portfolio, price, risk_pct, stop_pct)
+                    price        = result["price"]
+                    qty          = _size_position(portfolio, price, risk_pct, stop_pct)
+                    stop, target = _get_weekly_plan_exits(db, sym, mode)
+
                     if qty >= 1:
-                        stop, target = _get_weekly_plan_exits(db, sym, mode)
+                        # ── Pre-trade AI gate ──────────────────────────────
+                        if not _gate(db, sym, qty, price, stop, target, "BREAKOUT", mode):
+                            results.append({"sym": sym, "action": "BLOCKED_BY_AI"})
+                            continue
+                        # ──────────────────────────────────────────────────
+
                         try:
                             if stop > 0 and target > 0:
                                 alp.place_bracket_buy(sym, qty, stop, target, mode)
                             else:
                                 alp.place_market_buy(sym, qty, mode)
                                 logger.warning(
-                                    "Watchlist buy %s: no stop/target in %s weekly plan — "
-                                    "plain market buy, no exit orders attached.", sym, mode
+                                    "Watchlist buy %s: no stop/target — plain market buy [%s]",
+                                    sym, mode,
                                 )
                             _log_trade(db, sym, "BUY", qty, price, "BREAKOUT", mode)
                             new_breakouts.append(sym)

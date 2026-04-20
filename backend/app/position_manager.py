@@ -1,7 +1,10 @@
 """
 Position manager: Monday open fills + post-close slot refill with optional Claude analysis.
+Pre-trade AI gate runs before every buy order.
+Midweek slot-refill analysis runs before opening a replacement position.
 """
 import logging
+from datetime import date
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from .database import get_setting, set_setting
@@ -15,6 +18,97 @@ def _size_qty(portfolio: float, entry: float, stop: float, risk_pct: float, stop
     if stop_dollar <= 0:
         return 0
     return (portfolio * risk_pct / 100) / stop_dollar
+
+
+def _gate(
+    db: Session,
+    symbol: str,
+    qty: float,
+    entry: float,
+    stop: float,
+    target: float,
+    trigger: str,
+    mode: str,
+) -> bool:
+    """Pre-trade AI gate. Returns True if order should proceed."""
+    try:
+        from .claude_analyst import pre_trade_analysis, log_pre_trade
+        acct         = alp.get_account(mode)
+        portfolio    = float(acct.portfolio_value)
+        cash         = float(acct.cash)
+        buying_power = float(acct.buying_power)
+
+        result = pre_trade_analysis(
+            db=db, symbol=symbol, side="BUY", qty=qty,
+            entry_price=entry, stop_price=stop, target_price=target,
+            trigger=trigger, portfolio_value=portfolio,
+            cash=cash, buying_power=buying_power, mode=mode,
+        )
+        log_pre_trade(db, symbol, trigger, result["verdict"], result["reason"], result["analysis"], mode)
+
+        if not result["proceed"]:
+            logger.warning("Pre-trade gate BLOCKED %s [%s]: %s", symbol, trigger, result["reason"])
+            return False
+        if result["warnings"]:
+            logger.warning("Pre-trade gate WARNED %s [%s]: %s", symbol, trigger, ", ".join(result["warnings"]))
+        logger.info("Pre-trade gate PASSED %s [%s]: %s", symbol, trigger, result["reason"])
+        return True
+
+    except Exception as exc:
+        logger.error("Pre-trade gate error for %s: %s — proceeding.", symbol, exc)
+        return True
+
+
+def _infer_close_reason(db: Session, symbol: str, mode: str) -> tuple[str, float | None, float | None]:
+    """
+    Infer why a position closed by comparing the last known price against
+    the weekly plan's stop and target.
+    Returns (reason, entry_price, close_price).
+    """
+    try:
+        plan_row = db.execute(
+            text("""
+                SELECT entry_price, stop_price, target1
+                FROM weekly_plan
+                WHERE symbol = :sym AND mode = :mode
+                ORDER BY week_start DESC LIMIT 1
+            """),
+            {"sym": symbol, "mode": mode},
+        ).fetchone()
+
+        trade_row = db.execute(
+            text("""
+                SELECT price FROM trade_log
+                WHERE symbol = :s AND action = 'BUY' AND mode = :mode
+                ORDER BY created_at DESC LIMIT 1
+            """),
+            {"s": symbol, "mode": mode},
+        ).fetchone()
+
+        sell_row = db.execute(
+            text("""
+                SELECT price FROM trade_log
+                WHERE symbol = :s AND action = 'SELL' AND mode = :mode
+                ORDER BY created_at DESC LIMIT 1
+            """),
+            {"s": symbol, "mode": mode},
+        ).fetchone()
+
+        entry_price = float(trade_row[0]) if trade_row else None
+        close_price = float(sell_row[0])  if sell_row  else None
+
+        if plan_row and close_price:
+            stop   = float(plan_row[1] or 0)
+            target = float(plan_row[2] or 0)
+            if stop   > 0 and close_price <= stop   * 1.01:
+                return "stop_hit",    entry_price, close_price
+            if target > 0 and close_price >= target * 0.99:
+                return "target_hit",  entry_price, close_price
+
+        return "manual", entry_price, close_price
+
+    except Exception:
+        return "manual", None, None
 
 
 def run_monday_open(db: Session):
@@ -61,7 +155,7 @@ def run_monday_open(db: Session):
         return
 
     try:
-        acct = alp.get_account(mode)
+        acct      = alp.get_account(mode)
         portfolio = float(acct.portfolio_value)
     except Exception as exc:
         logger.error("Monday open: could not fetch account: %s", exc)
@@ -69,7 +163,7 @@ def run_monday_open(db: Session):
 
     risk_pct = float(get_setting(db, "risk_pct", "2.0"))
     stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
-    held = {p.symbol for p in positions}
+    held     = {p.symbol for p in positions}
 
     for row in rows:
         sym    = row[0]
@@ -83,6 +177,9 @@ def run_monday_open(db: Session):
         qty = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
         if qty < 1:
             logger.info("Monday open: skipping %s — position size < 1 share.", sym)
+            continue
+
+        if not _gate(db, sym, qty, entry, stop, target, "MONDAY_OPEN", mode):
             continue
 
         try:
@@ -102,8 +199,7 @@ def run_monday_open(db: Session):
             db.execute(
                 text("""
                     UPDATE weekly_plan SET status = 'EXECUTED'
-                    WHERE symbol = :sym
-                      AND mode = :mode
+                    WHERE symbol = :sym AND mode = :mode
                       AND week_start = (
                           SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
                       )
@@ -126,10 +222,11 @@ def run_monday_open(db: Session):
 
 def check_post_close(db: Session):
     """
-    Called in each monitor cycle. Compares current positions against the saved
-    mode-scoped snapshot to detect newly closed positions, then:
-      1. Runs Claude analysis (if API key configured)
-      2. Auto-executes the next PENDING pick into the freed slot (if auto_execute)
+    Called in each monitor cycle. Detects newly closed positions then:
+      1. Infers why the position closed
+      2. Runs post-close Claude analysis
+      3. Runs slot-refill analysis to decide whether to open a replacement
+      4. If approved, runs pre-trade gate before executing
     """
     mode = get_setting(db, "trading_mode", "paper")
 
@@ -139,7 +236,6 @@ def check_post_close(db: Session):
         logger.error("check_post_close: cannot fetch positions: %s", exc)
         return
 
-    # Mode-scoped snapshot key — paper and live never share state
     snapshot_key = f"positions_snapshot_{mode}"
     snap_row = db.execute(
         text("SELECT value FROM settings WHERE key = :k"),
@@ -155,20 +251,298 @@ def check_post_close(db: Session):
         return
 
     logger.info("[%s] Detected closed positions: %s", mode, closed)
+
     api_key   = get_setting(db, "claude_api_key", "")
     auto_exec = get_setting(db, "auto_execute", "true").lower() == "true"
     max_pos   = int(get_setting(db, "max_positions", "10"))
 
     for sym in closed:
+        # Step 1 — infer close reason
+        close_reason, entry_price, close_price = _infer_close_reason(db, sym, mode)
+        logger.info(
+            "Post-close [%s]: %s closed via %s (entry=$%s close=$%s)",
+            mode, sym, close_reason,
+            f"{entry_price:.2f}" if entry_price else "?",
+            f"{close_price:.2f}" if close_price else "?",
+        )
+
+        # Step 2 — post-close narrative analysis
         if api_key:
             _run_claude_analysis(db, sym, mode)
 
+        # Step 3 — slot-refill analysis
         if auto_exec and len(current) < max_pos:
-            _execute_next_pick(db, mode, current)
+            _refill_slot(
+                db=db,
+                mode=mode,
+                closed_symbol=sym,
+                close_reason=close_reason,
+                entry_price=entry_price,
+                close_price=close_price,
+                current_positions=current,
+                max_pos=max_pos,
+            )
+            # Refresh current set after potential buy
             try:
                 current = {p.symbol for p in alp.get_positions(mode)}
             except Exception:
                 pass
+
+
+def _refill_slot(
+    db: Session,
+    mode: str,
+    closed_symbol: str,
+    close_reason: str,
+    entry_price: float | None,
+    close_price: float | None,
+    current_positions: set,
+    max_pos: int,
+):
+    """
+    Run slot-refill analysis and execute the recommended pick if approved.
+    """
+    from .claude_analyst import analyze_slot_refill, log_analysis
+
+    # Fetch account state
+    try:
+        acct         = alp.get_account(mode)
+        portfolio    = float(acct.portfolio_value)
+        cash         = float(acct.cash)
+        buying_power = float(acct.buying_power)
+    except Exception as exc:
+        logger.error("Slot refill: account fetch failed: %s", exc)
+        return
+
+    # Fetch remaining PENDING picks
+    pending_rows = db.execute(
+        text("""
+            SELECT symbol, score, signal, entry_price, stop_price, target1, rationale, rank
+            FROM weekly_plan
+            WHERE week_start = (
+                SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
+            )
+              AND mode = :mode
+              AND status = 'PENDING'
+              AND symbol NOT IN :held
+            ORDER BY rank ASC
+        """),
+        {
+            "mode": mode,
+            "held": tuple(current_positions) if current_positions else ("__none__",),
+        },
+    ).fetchall()
+
+    pending_picks = [dict(r._mapping) for r in pending_rows]
+
+    if not pending_picks:
+        logger.info("Slot refill [%s]: no PENDING picks remaining.", mode)
+        return
+
+    # Run slot-refill analysis
+    try:
+        analysis = analyze_slot_refill(
+            db=db,
+            closed_symbol=closed_symbol,
+            close_reason=close_reason,
+            entry_price=entry_price,
+            close_price=close_price,
+            portfolio_value=portfolio,
+            cash=cash,
+            buying_power=buying_power,
+            open_positions=list(current_positions),
+            pending_picks=pending_picks,
+            mode=mode,
+        )
+
+        # Log the refill analysis
+        log_analysis(
+            db,
+            trigger="slot_refill",
+            symbol=closed_symbol,
+            analysis_text=(
+                f"Closed: {closed_symbol} ({close_reason})\n"
+                f"VERDICT: {analysis['verdict']}\n"
+                f"SYMBOL: {analysis['symbol'] or 'NONE'}\n"
+                f"REASON: {analysis['reason']}\n\n"
+                f"{analysis['analysis']}"
+            ),
+            mode=mode,
+        )
+
+        logger.info(
+            "Slot refill analysis [%s]: verdict=%s symbol=%s reason=%s",
+            mode, analysis["verdict"], analysis["symbol"], analysis["reason"],
+        )
+
+        if not analysis["should_open"]:
+            logger.info(
+                "Slot refill [%s]: %s — no new position opened.",
+                mode, analysis["verdict"],
+            )
+            return
+
+        # Execute the recommended pick
+        _execute_specific_pick(
+            db=db,
+            mode=mode,
+            symbol=analysis["symbol"],
+            pending_picks=pending_picks,
+        )
+
+    except Exception as exc:
+        logger.error("Slot refill analysis failed: %s — falling back to next pick.", exc)
+        # Fallback: execute next pick without analysis if Claude fails
+        _execute_next_pick(db, mode, current_positions)
+
+
+def _execute_specific_pick(
+    db: Session,
+    mode: str,
+    symbol: str,
+    pending_picks: list[dict],
+):
+    """Execute a specific symbol from the pending picks list."""
+    pick = next((p for p in pending_picks if p["symbol"] == symbol), None)
+    if not pick:
+        logger.warning("Slot refill: recommended symbol %s not found in pending picks.", symbol)
+        return
+
+    entry  = float(pick.get("entry_price") or 0)
+    stop   = float(pick.get("stop_price")  or 0)
+    target = float(pick.get("target1")     or 0)
+
+    if entry <= 0:
+        logger.warning("Slot refill: %s has no entry price — skipping.", symbol)
+        return
+
+    try:
+        acct      = alp.get_account(mode)
+        portfolio = float(acct.portfolio_value)
+    except Exception as exc:
+        logger.error("Slot refill: account fetch failed: %s", exc)
+        return
+
+    risk_pct = float(get_setting(db, "risk_pct", "2.0"))
+    stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
+    qty      = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
+
+    if qty < 1:
+        logger.info("Slot refill: %s position size < 1 share — skipping.", symbol)
+        return
+
+    # Pre-trade gate
+    if not _gate(db, symbol, qty, entry, stop, target, "SLOT_REFILL", mode):
+        return
+
+    try:
+        if stop > 0 and target > 0:
+            alp.place_bracket_buy(symbol, qty, stop, target, mode)
+            logger.info(
+                "Slot refill: bracket buy %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
+                symbol, qty, stop, target, mode,
+            )
+        else:
+            alp.place_market_buy(symbol, qty, mode)
+            logger.info("Slot refill: market buy %s qty=%.0f [%s]", symbol, qty, mode)
+
+        db.execute(
+            text("""
+                UPDATE weekly_plan SET status = 'EXECUTED'
+                WHERE symbol = :sym AND mode = :mode
+                  AND week_start = (
+                      SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
+                  )
+            """),
+            {"sym": symbol, "mode": mode},
+        )
+        db.execute(
+            text("""
+                INSERT INTO trade_log (symbol, action, qty, price, trigger, mode)
+                VALUES (:s, 'BUY', :q, :p, 'SLOT_REFILL', :m)
+            """),
+            {"s": symbol, "q": qty, "p": entry, "m": mode},
+        )
+        db.commit()
+        logger.info("Slot refill complete: opened %s [%s]", symbol, mode)
+
+    except Exception as exc:
+        logger.error("Slot refill buy failed for %s: %s", symbol, exc)
+
+
+def _execute_next_pick(db: Session, mode: str, held: set):
+    """Fallback — execute the next PENDING pick without analysis."""
+    row = db.execute(
+        text("""
+            SELECT symbol, entry_price, stop_price, target1
+            FROM weekly_plan
+            WHERE week_start = (
+                SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
+            )
+              AND mode = :mode
+              AND status = 'PENDING'
+            ORDER BY rank ASC
+            LIMIT 1
+        """),
+        {"mode": mode},
+    ).fetchone()
+
+    if not row:
+        logger.info("Post-close fallback: no PENDING picks left for mode=%s.", mode)
+        return
+
+    sym    = row[0]
+    entry  = float(row[1] or 0)
+    stop   = float(row[2] or 0)
+    target = float(row[3] or 0)
+
+    if sym in held or entry <= 0:
+        return
+
+    try:
+        acct      = alp.get_account(mode)
+        portfolio = float(acct.portfolio_value)
+    except Exception as exc:
+        logger.error("Post-close fallback: account fetch failed: %s", exc)
+        return
+
+    risk_pct = float(get_setting(db, "risk_pct", "2.0"))
+    stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
+    qty      = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
+    if qty < 1:
+        return
+
+    if not _gate(db, sym, qty, entry, stop, target, "POST_CLOSE", mode):
+        return
+
+    try:
+        if stop > 0 and target > 0:
+            alp.place_bracket_buy(sym, qty, stop, target, mode)
+        else:
+            alp.place_market_buy(sym, qty, mode)
+
+        db.execute(
+            text("""
+                UPDATE weekly_plan SET status = 'EXECUTED'
+                WHERE symbol = :sym AND mode = :mode
+                  AND week_start = (
+                      SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
+                  )
+            """),
+            {"sym": sym, "mode": mode},
+        )
+        db.execute(
+            text("""
+                INSERT INTO trade_log (symbol, action, qty, price, trigger, mode)
+                VALUES (:s, 'BUY', :q, :p, 'POST_CLOSE', :m)
+            """),
+            {"s": sym, "q": qty, "p": entry, "m": mode},
+        )
+        db.commit()
+        logger.info("Post-close fallback: opened %s [%s]", sym, mode)
+
+    except Exception as exc:
+        logger.error("Post-close fallback buy failed for %s: %s", sym, exc)
 
 
 def _run_claude_analysis(db: Session, closed_sym: str, mode: str):
@@ -194,8 +568,7 @@ def _run_claude_analysis(db: Session, closed_sym: str, mode: str):
             text("""
                 SELECT price FROM trade_log
                 WHERE symbol = :s AND action = 'BUY' AND mode = :mode
-                ORDER BY created_at DESC
-                LIMIT 1
+                ORDER BY created_at DESC LIMIT 1
             """),
             {"s": closed_sym, "mode": mode},
         ).fetchone()
@@ -208,86 +581,7 @@ def _run_claude_analysis(db: Session, closed_sym: str, mode: str):
 
         analysis = analyze_picks(db, picks, closed_position=closed_ctx)
         log_analysis(db, "post_close", closed_sym, analysis, mode)
-        logger.info("Claude analysis saved for post-close of %s [%s].", closed_sym, mode)
+        logger.info("Post-close analysis saved for %s [%s].", closed_sym, mode)
 
     except Exception as exc:
-        logger.warning("Claude analysis failed for %s: %s", closed_sym, exc)
-
-
-def _execute_next_pick(db: Session, mode: str, held: set):
-    row = db.execute(
-        text("""
-            SELECT symbol, entry_price, stop_price, target1
-            FROM weekly_plan
-            WHERE week_start = (
-                SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
-            )
-              AND mode = :mode
-              AND status = 'PENDING'
-            ORDER BY rank ASC
-            LIMIT 1
-        """),
-        {"mode": mode},
-    ).fetchone()
-
-    if not row:
-        logger.info("Post-close: no PENDING picks left for mode=%s.", mode)
-        return
-
-    sym    = row[0]
-    entry  = float(row[1] or 0)
-    stop   = float(row[2] or 0)
-    target = float(row[3] or 0)
-
-    if sym in held or entry <= 0:
-        return
-
-    try:
-        acct = alp.get_account(mode)
-        portfolio = float(acct.portfolio_value)
-    except Exception as exc:
-        logger.error("Post-close: account fetch failed: %s", exc)
-        return
-
-    risk_pct = float(get_setting(db, "risk_pct", "2.0"))
-    stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
-    qty = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
-    if qty < 1:
-        return
-
-    try:
-        if stop > 0 and target > 0:
-            alp.place_bracket_buy(sym, qty, stop, target, mode)
-            logger.info(
-                "Post-close auto-buy: bracket %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
-                sym, qty, stop, target, mode,
-            )
-        else:
-            alp.place_market_buy(sym, qty, mode)
-            logger.info(
-                "Post-close auto-buy: market %s qty=%.0f (no bracket — missing stop/target) [%s]",
-                sym, qty, mode,
-            )
-
-        db.execute(
-            text("""
-                UPDATE weekly_plan SET status = 'EXECUTED'
-                WHERE symbol = :sym
-                  AND mode = :mode
-                  AND week_start = (
-                      SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
-                  )
-            """),
-            {"sym": sym, "mode": mode},
-        )
-        db.execute(
-            text("""
-                INSERT INTO trade_log (symbol, action, qty, price, trigger, mode)
-                VALUES (:s, 'BUY', :q, :p, 'POST_CLOSE', :m)
-            """),
-            {"s": sym, "q": qty, "p": entry, "m": mode},
-        )
-        db.commit()
-
-    except Exception as exc:
-        logger.error("Post-close auto-buy failed for %s: %s", sym, exc)
+        logger.warning("Post-close analysis failed for %s: %s", closed_sym, exc)

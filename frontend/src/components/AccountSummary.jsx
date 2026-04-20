@@ -15,8 +15,16 @@ function fmt(n, sign=false) {
   return `${prefix}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-export default function AccountSummary({ onModeChange }) {
-  const { data, isLoading, isError } = useQuery('account', () => fetchAccount())
+export default function AccountSummary({ onModeChange, refetchInterval = 5000 }) {
+  const { data, isLoading, isError, dataUpdatedAt } = useQuery(
+    'account',
+    () => fetchAccount(),
+    {
+      refetchInterval,
+      refetchIntervalInBackground: true,
+      staleTime: 2000,
+    }
+  )
 
   if (isLoading) return <div className="bg-card rounded-xl p-6 animate-pulse h-28" />
   if (isError || !data) return (
@@ -27,6 +35,7 @@ export default function AccountSummary({ onModeChange }) {
 
   const pnlColor = data.day_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
   const isPaper  = data.mode === 'paper'
+  const lastSync = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null
 
   return (
     <div className={`bg-card border rounded-xl p-6 ${
@@ -40,9 +49,15 @@ export default function AccountSummary({ onModeChange }) {
               Live Account
             </span>
           )}
+          {/* Live pulse indicator */}
+          <div className="flex items-center gap-1.5" title={`Last synced: ${lastSync}`}>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-[10px] text-slate-500">Live</span>
+          </div>
         </div>
         <ModeSwitch mode={data.mode} onSwitch={onModeChange} />
       </div>
+
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-6">
         <Stat label="Portfolio"    value={fmt(data.portfolio_value)} />
         <Stat label="Cash"         value={fmt(data.cash)} />
@@ -51,6 +66,12 @@ export default function AccountSummary({ onModeChange }) {
               value={`${fmt(data.day_pnl, true)} (${data.day_pnl_pct >= 0 ? '+' : ''}${data.day_pnl_pct.toFixed(2)}%)`}
               color={pnlColor} />
       </div>
+
+      {lastSync && (
+        <p className="text-[10px] text-slate-600 mt-3 text-right">
+          Last synced {lastSync}
+        </p>
+      )}
     </div>
   )
 }

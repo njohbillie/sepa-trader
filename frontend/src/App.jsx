@@ -10,35 +10,38 @@ import { fetchPositions, updateSetting } from './api/client'
 
 const TABS = ['Positions', 'Orders', 'History', 'Weekly Plan', 'Settings']
 
+// Refresh intervals — aggressive during market hours, relaxed otherwise
+const POSITIONS_INTERVAL = 5000   // 5s — near real-time position P&L
+const ACCOUNT_INTERVAL   = 5000   // 5s — buying power / cash stays current
+
 export default function App() {
-  const [tab, setTab]           = useState('Positions')
+  const [tab, setTab]             = useState('Positions')
   const [switching, setSwitching] = useState(false)
-  const qc                      = useQueryClient()
+  const qc                        = useQueryClient()
 
   const { data: positions = [], isLoading, isError: posError } = useQuery(
     'positions',
     () => fetchPositions(),
-    { refetchInterval: 30000 }
+    {
+      refetchInterval:            POSITIONS_INTERVAL,
+      refetchIntervalInBackground: true,   // keep refreshing even if tab is backgrounded
+      staleTime:                  2000,
+    }
   )
 
   async function handleModeChange(newMode) {
     if (switching) return
-
-    // Extra confirmation gate for switching TO live
     if (newMode === 'live') {
       const confirmed = window.confirm(
         '⚠️ Switch to LIVE trading?\n\n' +
         'Real money will be used. Ensure your live Alpaca credentials are set in .env ' +
-        'and that you have reviewed your positions and exit orders.\n\n' +
-        'Press OK to confirm.'
+        'and that you have reviewed your positions and exit orders.\n\nPress OK to confirm.'
       )
       if (!confirmed) return
     }
-
     setSwitching(true)
     try {
       await updateSetting('trading_mode', newMode)
-      // Invalidate everything — positions, orders, account, weekly plan all change per mode
       await qc.invalidateQueries()
     } catch (err) {
       alert(`Failed to switch mode: ${err?.response?.data?.detail || err.message}`)
@@ -54,7 +57,7 @@ export default function App() {
     <div className="min-h-screen bg-surface">
       <Navbar onModeChange={handleModeChange} />
 
-      {/* Switching overlay — blocks interaction during mode transition */}
+      {/* Mode-switch overlay */}
       {switching && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center">
           <div className="bg-card border border-border rounded-xl px-8 py-6 text-center space-y-2">
@@ -67,7 +70,6 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
 
-        {/* Alert banners */}
         {urgent.length > 0 && (
           <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-5 py-3 flex items-center gap-3">
             <span className="text-red-400 font-bold text-sm">URGENT</span>
@@ -85,7 +87,10 @@ export default function App() {
           </div>
         )}
 
-        <AccountSummary onModeChange={handleModeChange} />
+        <AccountSummary
+          onModeChange={handleModeChange}
+          refetchInterval={ACCOUNT_INTERVAL}
+        />
 
         {/* Tabs */}
         <div className="flex gap-1 bg-card border border-border rounded-xl p-1 w-fit">
@@ -107,7 +112,6 @@ export default function App() {
           ))}
         </div>
 
-        {/* Tab content */}
         {tab === 'Positions' && (
           <div>
             {isLoading ? (
