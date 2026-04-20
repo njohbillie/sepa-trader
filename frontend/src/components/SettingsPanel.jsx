@@ -3,13 +3,15 @@ import { useQuery, useQueryClient } from 'react-query'
 import { fetchSettings, updateSetting } from '../api/client'
 
 const FIELDS = [
-  { key: 'auto_execute',      label: 'Auto Execute',            type: 'toggle' },
-  { key: 'risk_pct',          label: 'Risk per Trade %',        type: 'number' },
-  { key: 'stop_loss_pct',     label: 'Stop Loss %',             type: 'number' },
-  { key: 'max_positions',     label: 'Max Positions',           type: 'number' },
-  { key: 'watchlist',         label: 'Watchlist (CSV)',         type: 'text'   },
-  { key: 'screener_universe', label: 'Screener Universe (CSV)', type: 'text'   },
-  { key: 'webhook_secret',    label: 'Webhook Secret',          type: 'text'   },
+  { key: 'auto_execute',      label: 'Auto Execute',            type: 'toggle'   },
+  { key: 'risk_pct',          label: 'Risk per Trade %',        type: 'number'   },
+  { key: 'stop_loss_pct',     label: 'Stop Loss %',             type: 'number'   },
+  { key: 'max_positions',     label: 'Max Positions',           type: 'number'   },
+  { key: 'watchlist',         label: 'Watchlist (CSV)',         type: 'text'     },
+  { key: 'screener_universe', label: 'Screener Universe (CSV)', type: 'text'     },
+  { key: 'webhook_secret',    label: 'Webhook Secret',          type: 'password' },
+  { key: 'tv_username',       label: 'TradingView Username',    type: 'text'     },
+  { key: 'tv_password',       label: 'TradingView Password',    type: 'password' },
 ]
 
 export default function SettingsPanel() {
@@ -69,7 +71,7 @@ function Field({ field, value, saving, onSave }) {
       <label className="text-xs text-slate-400 block mb-1">{field.label}</label>
       <div className="flex gap-2">
         <input
-          type={field.type === 'number' ? 'number' : 'text'}
+          type={field.type === 'number' ? 'number' : field.type === 'password' ? 'password' : 'text'}
           value={current}
           onChange={e => setLocal(e.target.value)}
           className="flex-1 bg-transparent text-slate-200 text-sm outline-none border-b border-border focus:border-accent"
