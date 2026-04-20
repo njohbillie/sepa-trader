@@ -119,8 +119,9 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     errors   = sum(1 for r in results_map.values() if r.get("signal") in ("ERROR", "INSUFFICIENT_DATA"))
     top_score = all_scored[0]["score"] if all_scored else 0
 
-    # Adaptive threshold: prefer >= 7 (true stage 2), step down if needed
-    for min_score in (7, 6, 5, 4):
+    # Adaptive threshold — max score via TV scanner is 6/8 (no 52W high/low).
+    # Prefer the strongest EMA structure; step down until we have 5+ candidates.
+    for min_score in (6, 5, 4, 3):
         candidates = [c for c in all_scored if c["score"] >= min_score]
         if len(candidates) >= 5:
             break

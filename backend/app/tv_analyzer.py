@@ -14,17 +14,16 @@ logger = logging.getLogger(__name__)
 
 SCAN_URL = "https://scanner.tradingview.com/america/scan"
 
-# Confirmed-valid TradingView scanner columns (no EMA150 — not a standard TV field;
-# no bracket notation — not supported; High.1Y/Low.1Y for 52-week range).
+# Confirmed-valid TradingView scanner columns only.
+# EMA150 is not a standard TV field — interpolated from EMA100+EMA200.
+# 52W High/Low not available via scanner API — those 2 criteria score 0; max is 6/8.
 _COLS = [
     "close",
     "EMA20",
     "EMA50",
-    "EMA100",                   # proxy for EMA150 (interpolated with EMA200)
+    "EMA100",                   # proxy for EMA150
     "EMA200",
-    "SMA200",                   # EMA200 > SMA200 → EMA200 is rising (trend check)
-    "High.1Y",                  # 52-week high
-    "Low.1Y",                   # 52-week low
+    "SMA200",                   # EMA200 > SMA200 → EMA200 is rising
     "volume",
     "average_volume_30d_calc",
 ]
@@ -98,8 +97,8 @@ def _score_sepa(symbol: str, v: dict) -> dict:
     e100     = v.get("EMA100") or 0
     e200     = v.get("EMA200") or 0
     sma200   = v.get("SMA200") or 0
-    w52h     = v.get("High.1Y") or 0
-    w52l     = v.get("Low.1Y") or 0
+    w52h     = 0  # not available via TV scanner — criterion 7 always 0
+    w52l     = 0  # not available via TV scanner — criterion 8 always 0
     vol      = v.get("volume") or 0
     vol_avg  = v.get("average_volume_30d_calc") or 1
 
