@@ -29,7 +29,12 @@ _COLS = [
 ]
 
 
-def batch_analyze(symbols: list[str]) -> dict[str, dict]:
+def batch_analyze(
+    symbols: list[str],
+    vol_surge_pct: float = 40.0,
+    ema20_pct: float = 2.0,
+    ema50_pct: float = 3.0,
+) -> dict[str, dict]:
     """
     Fetch SEPA indicators for every symbol in one TradingView API call.
     Returns {symbol: result_dict} in the same format as sepa_analyzer.analyze().
@@ -66,7 +71,7 @@ def batch_analyze(symbols: list[str]) -> dict[str, dict]:
     for row in rows:
         sym = row["s"].split(":")[-1]
         vals = dict(zip(_COLS, row["d"]))
-        results[sym] = _score_sepa(sym, vals)
+        results[sym] = _score_sepa(sym, vals, vol_surge_pct, ema20_pct, ema50_pct)
 
     # Symbols TradingView didn't return (unknown/delisted)
     for s in symbols:
@@ -87,7 +92,13 @@ def analyze(symbol: str) -> dict:
     return batch_analyze([symbol]).get(symbol, {"signal": "ERROR", "score": 0, "price": None})
 
 
-def _score_sepa(symbol: str, v: dict) -> dict:
+def _score_sepa(
+    symbol: str,
+    v: dict,
+    vol_surge_pct: float = 40.0,
+    ema20_pct: float = 2.0,
+    ema50_pct: float = 3.0,
+) -> dict:
     close = v.get("close")
     if not close:
         return {"signal": "INSUFFICIENT_DATA", "score": 0, "price": None}
@@ -120,9 +131,9 @@ def _score_sepa(symbol: str, v: dict) -> dict:
         bool(w52l and close >= w52l * 1.30),
     ])
 
-    vol_surge   = bool(vol and vol_avg and vol > vol_avg * 1.4)
-    e20_near    = bool(e20  and abs(close - e20)  / e20  * 100 <= 2.0)
-    e50_near    = bool(e50  and abs(close - e50)  / e50  * 100 <= 3.0)
+    vol_surge   = bool(vol and vol_avg and vol > vol_avg * (1 + vol_surge_pct / 100))
+    e20_near    = bool(e20  and abs(close - e20)  / e20  * 100 <= ema20_pct)
+    e50_near    = bool(e50  and abs(close - e50)  / e50  * 100 <= ema50_pct)
     above_pivot = score >= 7
 
     if score >= 7:

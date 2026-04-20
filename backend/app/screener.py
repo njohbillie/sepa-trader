@@ -81,7 +81,7 @@ def _generate_rationale(symbol: str, result: dict) -> str:
 
 def run_screener(db: Session, mode: str = None) -> list[dict]:
     """
-    Scan the stock universe, select top 10 SEPA candidates, save to
+    Scan the stock universe, select top-N SEPA candidates, save to
     weekly_plan table, and update the watchlist setting.
     Returns a list of plan row dicts.
     """
@@ -90,6 +90,15 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
 
     risk_pct = float(get_setting(db, "risk_pct", "2.0"))
     stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
+
+    # --- Screener filter settings ---
+    price_min        = float(get_setting(db, "screener_price_min",      "0")   or "0")
+    price_max        = float(get_setting(db, "screener_price_max",      "0")   or "0")
+    top_n            = int(  get_setting(db, "screener_top_n",          "10")  or "10")
+    min_score_floor  = int(  get_setting(db, "screener_min_score",      "0")   or "0")
+    vol_surge_pct    = float(get_setting(db, "screener_vol_surge_pct",  "40")  or "40")
+    ema20_pct        = float(get_setting(db, "screener_ema20_pct",      "2.0") or "2.0")
+    ema50_pct        = float(get_setting(db, "screener_ema50_pct",      "3.0") or "3.0")
 
     account = _get_portfolio_value(mode)
 
@@ -103,39 +112,54 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     logger.info("Screener: scanning %d symbols via TradingView (mode=%s)...", len(universe), mode)
 
     # Single batch call — all symbols in one TradingView scanner request
-    results_map = batch_analyze(universe)
+    results_map = batch_analyze(universe, vol_surge_pct=vol_surge_pct, ema20_pct=ema20_pct, ema50_pct=ema50_pct)
 
-    # Build scored list (exclude errors and missing prices)
-    all_scored = [
-        {"symbol": sym, **result}
-        for sym, result in results_map.items()
-        if result.get("price") and result.get("signal") not in ("ERROR", "INSUFFICIENT_DATA")
-    ]
+    # Build scored list; apply price filter
+    all_scored = []
+    for sym, result in results_map.items():
+        if not result.get("price") or result.get("signal") in ("ERROR", "INSUFFICIENT_DATA"):
+            continue
+        price = float(result["price"])
+        if price_min > 0 and price < price_min:
+            continue
+        if price_max > 0 and price > price_max:
+            continue
+        all_scored.append({"symbol": sym, **result})
+
     all_scored.sort(
         key=lambda x: (x["score"], int(bool(x.get("vol_surge"))), int(bool(x.get("above_pivot")))),
         reverse=True,
     )
 
-    errors   = sum(1 for r in results_map.values() if r.get("signal") in ("ERROR", "INSUFFICIENT_DATA"))
+    errors    = sum(1 for r in results_map.values() if r.get("signal") in ("ERROR", "INSUFFICIENT_DATA"))
     top_score = all_scored[0]["score"] if all_scored else 0
 
-    # Adaptive threshold — max score via TV scanner is 6/8 (no 52W high/low).
-    # Prefer the strongest EMA structure; step down until we have 5+ candidates.
-    for min_score in (6, 5, 4, 3):
-        candidates = [c for c in all_scored if c["score"] >= min_score]
-        if len(candidates) >= 5:
-            break
+    # Adaptive threshold — max score via TV scanner is 6/8.
+    # If user set a manual floor, respect it; otherwise step down until 5+ candidates.
+    if min_score_floor > 0:
+        candidates = [c for c in all_scored if c["score"] >= min_score_floor]
+    else:
+        candidates = []
+        for min_score in (6, 5, 4, 3):
+            candidates = [c for c in all_scored if c["score"] >= min_score]
+            if len(candidates) >= 5:
+                break
 
-    top10 = candidates[:10] if candidates else []
+    top_picks = candidates[:top_n] if candidates else []
 
+    effective_min = min_score_floor if min_score_floor > 0 else (
+        next((s for s in (6, 5, 4, 3) if len([c for c in all_scored if c["score"] >= s]) >= 5), 3)
+    )
     summary_msg = (
         f"Screener: scanned {len(universe)}, "
         f"errors {errors}, "
         f"scored {len(all_scored)}, "
-        f"qualifying (>={min_score if candidates else 4}) {len(candidates)}, "
-        f"selected {len(top10)}. "
+        f"qualifying (>={effective_min}) {len(candidates)}, "
+        f"selected {len(top_picks)}. "
         f"Top score: {top_score}/8."
     )
+    if price_min > 0 or price_max > 0:
+        summary_msg += f" Price filter: ${price_min:.0f}–${price_max:.0f}." if price_max > 0 else f" Price min: ${price_min:.0f}."
 
     # If high error rate, surface a sample error to aid debugging
     if errors > len(universe) * 0.5:
@@ -154,7 +178,7 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     risk_dollars = account * (risk_pct / 100)
     plan_rows    = []
 
-    for rank, c in enumerate(top10, 1):
+    for rank, c in enumerate(top_picks, 1):
         price   = float(c["price"])
         stop    = round(price * (1 - stop_pct / 100), 4)
         target1 = round(price * (1 + stop_pct * 2 / 100), 4)
