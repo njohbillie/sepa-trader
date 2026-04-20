@@ -1,10 +1,8 @@
 """
-Position manager: Monday open fills + post-close slot refill with optional Claude analysis.
-Pre-trade AI gate runs before every buy order.
-Midweek slot-refill analysis runs before opening a replacement position.
+Position manager: Monday open fills + midweek slot refill with AI analysis.
+Pre-trade gate runs before every buy. Live <$10K accounts use conservative limits.
 """
 import logging
-from datetime import date
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from .database import get_setting, set_setting
@@ -20,6 +18,32 @@ def _size_qty(portfolio: float, entry: float, stop: float, risk_pct: float, stop
     return (portfolio * risk_pct / 100) / stop_dollar
 
 
+def _effective_max_positions(db: Session, mode: str) -> int:
+    """
+    For live accounts under $10K, cap max_positions at 3 regardless of
+    what the settings say. Paper accounts always use the settings value.
+    """
+    configured = int(get_setting(db, "max_positions", "10"))
+    if mode != "live":
+        return configured
+    try:
+        from .database import get_live_account_limits
+        acct   = alp.get_account(mode)
+        limits = get_live_account_limits(float(acct.portfolio_value))
+        cap    = limits.get("max_positions")
+        if cap is not None:
+            effective = min(configured, cap)
+            if effective != configured:
+                logger.info(
+                    "Live account <$10K: max_positions capped at %d (settings=%d)",
+                    effective, configured,
+                )
+            return effective
+    except Exception as exc:
+        logger.warning("_effective_max_positions: could not fetch account — using settings: %s", exc)
+    return configured
+
+
 def _gate(
     db: Session,
     symbol: str,
@@ -30,7 +54,7 @@ def _gate(
     trigger: str,
     mode: str,
 ) -> bool:
-    """Pre-trade AI gate. Returns True if order should proceed."""
+    """Pre-trade AI gate. Returns True if order should proceed. Fails open."""
     try:
         from .claude_analyst import pre_trade_analysis, log_pre_trade
         acct         = alp.get_account(mode)
@@ -44,7 +68,10 @@ def _gate(
             trigger=trigger, portfolio_value=portfolio,
             cash=cash, buying_power=buying_power, mode=mode,
         )
-        log_pre_trade(db, symbol, trigger, result["verdict"], result["reason"], result["analysis"], mode)
+        log_pre_trade(
+            db, symbol, trigger,
+            result["verdict"], result["reason"], result["analysis"], mode,
+        )
 
         if not result["proceed"]:
             logger.warning("Pre-trade gate BLOCKED %s [%s]: %s", symbol, trigger, result["reason"])
@@ -61,8 +88,8 @@ def _gate(
 
 def _infer_close_reason(db: Session, symbol: str, mode: str) -> tuple[str, float | None, float | None]:
     """
-    Infer why a position closed by comparing the last known price against
-    the weekly plan's stop and target.
+    Infer why a position closed by comparing last known close price
+    against the weekly plan's stop and target.
     Returns (reason, entry_price, close_price).
     """
     try:
@@ -101,9 +128,9 @@ def _infer_close_reason(db: Session, symbol: str, mode: str) -> tuple[str, float
             stop   = float(plan_row[1] or 0)
             target = float(plan_row[2] or 0)
             if stop   > 0 and close_price <= stop   * 1.01:
-                return "stop_hit",    entry_price, close_price
+                return "stop_hit",   entry_price, close_price
             if target > 0 and close_price >= target * 0.99:
-                return "target_hit",  entry_price, close_price
+                return "target_hit", entry_price, close_price
 
         return "manual", entry_price, close_price
 
@@ -115,6 +142,7 @@ def run_monday_open(db: Session):
     """
     Called every Monday at 9:35 ET. Fills available position slots from the
     current week's PENDING picks for the active mode. Respects max_positions.
+    Pre-trade AI gate runs before every buy.
     """
     mode      = get_setting(db, "trading_mode", "paper")
     auto_exec = get_setting(db, "auto_execute", "true").lower() == "true"
@@ -122,7 +150,7 @@ def run_monday_open(db: Session):
         logger.info("Monday open: auto_execute off — skipping.")
         return
 
-    max_pos = int(get_setting(db, "max_positions", "10"))
+    max_pos = _effective_max_positions(db, mode)
 
     try:
         positions = alp.get_positions(mode)
@@ -254,10 +282,9 @@ def check_post_close(db: Session):
 
     api_key   = get_setting(db, "claude_api_key", "")
     auto_exec = get_setting(db, "auto_execute", "true").lower() == "true"
-    max_pos   = int(get_setting(db, "max_positions", "10"))
+    max_pos   = _effective_max_positions(db, mode)
 
     for sym in closed:
-        # Step 1 — infer close reason
         close_reason, entry_price, close_price = _infer_close_reason(db, sym, mode)
         logger.info(
             "Post-close [%s]: %s closed via %s (entry=$%s close=$%s)",
@@ -266,11 +293,9 @@ def check_post_close(db: Session):
             f"{close_price:.2f}" if close_price else "?",
         )
 
-        # Step 2 — post-close narrative analysis
         if api_key:
             _run_claude_analysis(db, sym, mode)
 
-        # Step 3 — slot-refill analysis
         if auto_exec and len(current) < max_pos:
             _refill_slot(
                 db=db,
@@ -282,7 +307,6 @@ def check_post_close(db: Session):
                 current_positions=current,
                 max_pos=max_pos,
             )
-            # Refresh current set after potential buy
             try:
                 current = {p.symbol for p in alp.get_positions(mode)}
             except Exception:
@@ -299,12 +323,9 @@ def _refill_slot(
     current_positions: set,
     max_pos: int,
 ):
-    """
-    Run slot-refill analysis and execute the recommended pick if approved.
-    """
+    """Run slot-refill analysis and execute the recommended pick if approved."""
     from .claude_analyst import analyze_slot_refill, log_analysis
 
-    # Fetch account state
     try:
         acct         = alp.get_account(mode)
         portfolio    = float(acct.portfolio_value)
@@ -314,7 +335,7 @@ def _refill_slot(
         logger.error("Slot refill: account fetch failed: %s", exc)
         return
 
-    # Fetch remaining PENDING picks
+    held_tuple = tuple(current_positions) if current_positions else ("__none__",)
     pending_rows = db.execute(
         text("""
             SELECT symbol, score, signal, entry_price, stop_price, target1, rationale, rank
@@ -327,10 +348,7 @@ def _refill_slot(
               AND symbol NOT IN :held
             ORDER BY rank ASC
         """),
-        {
-            "mode": mode,
-            "held": tuple(current_positions) if current_positions else ("__none__",),
-        },
+        {"mode": mode, "held": held_tuple},
     ).fetchall()
 
     pending_picks = [dict(r._mapping) for r in pending_rows]
@@ -339,7 +357,6 @@ def _refill_slot(
         logger.info("Slot refill [%s]: no PENDING picks remaining.", mode)
         return
 
-    # Run slot-refill analysis
     try:
         analysis = analyze_slot_refill(
             db=db,
@@ -355,7 +372,6 @@ def _refill_slot(
             mode=mode,
         )
 
-        # Log the refill analysis
         log_analysis(
             db,
             trigger="slot_refill",
@@ -371,37 +387,22 @@ def _refill_slot(
         )
 
         logger.info(
-            "Slot refill analysis [%s]: verdict=%s symbol=%s reason=%s",
+            "Slot refill [%s]: verdict=%s symbol=%s reason=%s",
             mode, analysis["verdict"], analysis["symbol"], analysis["reason"],
         )
 
         if not analysis["should_open"]:
-            logger.info(
-                "Slot refill [%s]: %s — no new position opened.",
-                mode, analysis["verdict"],
-            )
+            logger.info("Slot refill [%s]: %s — no new position opened.", mode, analysis["verdict"])
             return
 
-        # Execute the recommended pick
-        _execute_specific_pick(
-            db=db,
-            mode=mode,
-            symbol=analysis["symbol"],
-            pending_picks=pending_picks,
-        )
+        _execute_specific_pick(db=db, mode=mode, symbol=analysis["symbol"], pending_picks=pending_picks)
 
     except Exception as exc:
         logger.error("Slot refill analysis failed: %s — falling back to next pick.", exc)
-        # Fallback: execute next pick without analysis if Claude fails
         _execute_next_pick(db, mode, current_positions)
 
 
-def _execute_specific_pick(
-    db: Session,
-    mode: str,
-    symbol: str,
-    pending_picks: list[dict],
-):
+def _execute_specific_pick(db: Session, mode: str, symbol: str, pending_picks: list[dict]):
     """Execute a specific symbol from the pending picks list."""
     pick = next((p for p in pending_picks if p["symbol"] == symbol), None)
     if not pick:
@@ -431,7 +432,6 @@ def _execute_specific_pick(
         logger.info("Slot refill: %s position size < 1 share — skipping.", symbol)
         return
 
-    # Pre-trade gate
     if not _gate(db, symbol, qty, entry, stop, target, "SLOT_REFILL", mode):
         return
 
@@ -471,7 +471,7 @@ def _execute_specific_pick(
 
 
 def _execute_next_pick(db: Session, mode: str, held: set):
-    """Fallback — execute the next PENDING pick without analysis."""
+    """Fallback — execute the next PENDING pick without slot-refill analysis."""
     row = db.execute(
         text("""
             SELECT symbol, entry_price, stop_price, target1

@@ -1,8 +1,11 @@
 """
 Auto-execution engine: fires trades based on SEPA signals.
-- Every 30-minute cycle: trailing stop adjustment + signal evaluation
-- Pre-trade AI gate runs before every buy order
-- Exit guard ensures every position has an OCO at all times
+Every 30-min cycle:
+  1. Trailing stop adjustment (green positions only)
+  2. Exit guard (ensure every position has an OCO)
+  3. Signal evaluation
+  4. Watchlist breakout entries
+Pre-trade AI gate + live account size limits applied throughout.
 """
 import asyncio
 import logging
@@ -24,6 +27,32 @@ def _size_position(portfolio_value: float, price: float, risk_pct: float, stop_p
     return risk_dollars / stop_dollars
 
 
+def _effective_max_positions(db: Session, mode: str) -> int:
+    """
+    For live accounts under $10K, cap max_positions at 3 regardless of
+    what the settings say. Paper accounts always use the settings value.
+    """
+    configured = int(get_setting(db, "max_positions", "10"))
+    if mode != "live":
+        return configured
+    try:
+        from .database import get_live_account_limits
+        acct   = alp.get_account(mode)
+        limits = get_live_account_limits(float(acct.portfolio_value))
+        cap    = limits.get("max_positions")
+        if cap is not None:
+            effective = min(configured, cap)
+            if effective != configured:
+                logger.info(
+                    "Live account <$10K: max_positions capped at %d (settings=%d)",
+                    effective, configured,
+                )
+            return effective
+    except Exception as exc:
+        logger.warning("_effective_max_positions: could not fetch account — using settings: %s", exc)
+    return configured
+
+
 def _get_weekly_plan_exits(db: Session, symbol: str, mode: str) -> tuple[float, float]:
     """Return (stop_price, target1) — most recent plan row for this symbol+mode."""
     row = db.execute(
@@ -43,10 +72,7 @@ def _get_weekly_plan_exits(db: Session, symbol: str, mode: str) -> tuple[float, 
 
 
 def _get_current_stop_price(orders: list) -> float | None:
-    """
-    Extract the active stop price from an open OCO/bracket order's stop leg.
-    Returns None if no stop leg is found.
-    """
+    """Extract the active stop price from open OCO/bracket order legs."""
     for o in orders:
         order_class = str(getattr(o, 'order_class', '') or '').lower()
         side        = str(getattr(o, 'side',        '') or '').lower()
@@ -55,7 +81,6 @@ def _get_current_stop_price(orders: list) -> float | None:
             continue
 
         if any(kw in order_class for kw in ('oco', 'bracket', 'oto')):
-            # Check child legs first (OCO structure)
             legs = getattr(o, 'legs', None) or []
             for leg in legs:
                 order_type = str(getattr(leg, 'type', '') or '').lower()
@@ -63,7 +88,6 @@ def _get_current_stop_price(orders: list) -> float | None:
                     sp = getattr(leg, 'stop_price', None)
                     if sp is not None:
                         return float(sp)
-            # Fallback: stop_price on the parent order itself
             sp = getattr(o, 'stop_price', None)
             if sp is not None:
                 return float(sp)
@@ -71,36 +95,25 @@ def _get_current_stop_price(orders: list) -> float | None:
     return None
 
 
-# ── Trailing stop logic ───────────────────────────────────────────────────────
-
-# R-based tiers for stop ratcheting.
-# Only applied when position is green — never touches red positions.
+# ── Trailing stop tiers ───────────────────────────────────────────────────────
+# Only applied to green positions. Red positions are never touched.
 #
-# Tier 1 — gain >= 1R:  move stop to breakeven (entry)
-# Tier 2 — gain >= 2R:  move stop to entry + 1R (lock in 1R profit)
-# Tier 3 — gain >= 3R:  trail stop at current_price - 1R (dynamic trailing)
-#
-# The stop only ever moves UP — never down.
+# Tier 3 (≥3R): trail 1R below current price (dynamic)
+# Tier 2 (≥2R): fix stop at entry + 1R (lock in 1R profit)
+# Tier 1 (≥1R): fix stop at entry (breakeven)
+# <1R:           no adjustment
 _TRAIL_TIERS = [
-    (3.0, lambda entry, R, price: price - R),           # trail 1R below current
-    (2.0, lambda entry, R, price: entry + R),           # lock in 1R
-    (1.0, lambda entry, R, price: entry),               # breakeven
+    (3.0, lambda entry, R, price: price - R),
+    (2.0, lambda entry, R, price: entry + R),
+    (1.0, lambda entry, R, price: entry),
 ]
 
-# Minimum improvement before replacing — avoids unnecessary API calls
-# for tiny stop moves (< 0.5% of current stop)
+# Minimum improvement before replacing — avoids API churn for tiny moves
 _MIN_STOP_IMPROVEMENT_PCT = 0.005
 
 
-def _compute_new_stop(
-    entry: float,
-    original_stop: float,
-    current_price: float,
-) -> float | None:
-    """
-    Given a position's entry, original stop, and current price,
-    return the new stop level or None if no adjustment is warranted.
-    """
+def _compute_new_stop(entry: float, original_stop: float, current_price: float) -> float | None:
+    """Return the ratcheted stop level or None if no adjustment warranted."""
     R = entry - original_stop
     if R <= 0:
         return None
@@ -110,11 +123,10 @@ def _compute_new_stop(
     for threshold, fn in _TRAIL_TIERS:
         if gain_r >= threshold:
             new_stop = round(fn(entry, R, current_price), 2)
-            # Safety: never set stop within 0.5% of current price (would trigger immediately)
-            max_stop = round(current_price * 0.995, 2)
+            max_stop = round(current_price * 0.995, 2)  # never within 0.5% of price
             return min(new_stop, max_stop)
 
-    return None  # gain < 1R — no adjustment
+    return None
 
 
 def _adjust_trailing_stops(
@@ -124,10 +136,8 @@ def _adjust_trailing_stops(
     mode: str,
 ):
     """
-    For each green position, ratchet the stop order upward according to
-    R-based tiers. Red positions are left untouched — let the stop do its job.
-
-    Called at the start of every 30-minute monitor cycle while market is open.
+    Ratchet stops upward for green positions each 30-minute cycle.
+    Red positions (current_price <= entry) are completely skipped.
     Updates weekly_plan.stop_price so the exit guard stays in sync.
     """
     for pos in positions:
@@ -136,26 +146,22 @@ def _adjust_trailing_stops(
         entry         = float(pos.avg_entry_price)
         qty           = float(pos.qty)
 
-        # ── Never touch red positions ────────────────────────────────────────
+        # Never touch red positions
         if current_price <= entry:
             continue
 
-        # Pull original stop and target from plan
         stop_orig, target = _get_weekly_plan_exits(db, sym, mode)
         if stop_orig <= 0 or target <= 0:
             logger.debug("Trailing stop: %s has no plan exits — skipping.", sym)
             continue
 
-        # Compute what the stop should be at current gain
         new_stop = _compute_new_stop(entry, stop_orig, current_price)
         if new_stop is None:
-            continue  # gain < 1R — no adjustment warranted
+            continue
 
-        # Find the currently active stop price from open orders
         current_stop = _get_current_stop_price(open_orders_by_symbol.get(sym, []))
         effective_current = current_stop if current_stop else stop_orig
 
-        # Only update if new stop is meaningfully higher
         if new_stop <= effective_current * (1 + _MIN_STOP_IMPROVEMENT_PCT):
             logger.debug(
                 "Trailing stop: %s new=$%.2f vs current=$%.2f — no update needed.",
@@ -163,24 +169,22 @@ def _adjust_trailing_stops(
             )
             continue
 
-        R    = entry - stop_orig
+        R      = entry - stop_orig
         gain_r = (current_price - entry) / R
 
         logger.info(
-            "Trailing stop: %s  gain=%.1fR  price=$%.2f  old_stop=$%.2f → new_stop=$%.2f  target=$%.2f [%s]",
+            "Trailing stop: %s  gain=%.1fR  price=$%.2f  stop $%.2f → $%.2f  target=$%.2f [%s]",
             sym, gain_r, current_price, effective_current, new_stop, target, mode,
         )
 
         try:
             alp.replace_oca_exit(sym, qty, new_stop, target, mode)
 
-            # Persist updated stop to weekly_plan so exit guard doesn't regress it
             db.execute(
                 text("""
                     UPDATE weekly_plan
                     SET stop_price = :stop
-                    WHERE symbol = :sym
-                      AND mode   = :mode
+                    WHERE symbol = :sym AND mode = :mode
                       AND week_start = (
                           SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
                       )
@@ -190,7 +194,7 @@ def _adjust_trailing_stops(
             db.commit()
 
             logger.info(
-                "Trailing stop updated: %s $%.2f → $%.2f (gain=%.1fR) [%s]",
+                "Trailing stop updated: %s $%.2f → $%.2f (%.1fR gain) [%s]",
                 sym, effective_current, new_stop, gain_r, mode,
             )
 
@@ -228,7 +232,6 @@ def _ensure_exit_orders(
 ):
     """
     Ensure every live position has an active OCO exit order.
-    Cancels orphaned standalone sell orders and places fresh OCOs where missing.
     Runs AFTER trailing stop adjustment so it sees the updated orders map.
     """
     oco_covered, orphan_order_ids = _classify_exit_orders(open_orders_by_symbol)
@@ -331,22 +334,19 @@ async def run_monitor(db: Session):
             try:
                 open_orders_by_symbol = alp.get_open_orders_by_symbol(mode)
 
-                # ── Step 1: Trailing stop adjustment ─────────────────────────
-                # Green positions get their stops ratcheted up.
-                # Red positions are untouched — let the original stop do its job.
+                # Step 1 — trailing stop adjustment (green positions only)
                 _adjust_trailing_stops(db, positions, open_orders_by_symbol, mode)
 
-                # Re-fetch open orders after potential cancel+replace from trailing stops
+                # Re-fetch after potential cancel+replace
                 open_orders_by_symbol = alp.get_open_orders_by_symbol(mode)
 
-                # ── Step 2: Exit guard ────────────────────────────────────────
-                # Ensure every position still has an active OCO after the stop adjustments
+                # Step 2 — exit guard (ensure OCO on every position)
                 _ensure_exit_orders(db, positions, open_orders_by_symbol, mode)
 
             except Exception as exc:
                 logger.error("Stop management cycle failed: %s", exc)
 
-        # ── Step 3: Signal evaluation ─────────────────────────────────────────
+        # Step 3 — signal evaluation
         stage2_lost   = []
         new_breakouts = []
         results       = []
@@ -372,10 +372,10 @@ async def run_monitor(db: Session):
 
             results.append({"sym": sym, "signal": signal})
 
-        # ── Step 4: Watchlist breakout entries ────────────────────────────────
+        # Step 4 — watchlist breakout entries
         held_symbols = {p.symbol for p in positions}
         watchlist    = _get_watchlist(db)
-        max_pos      = int(get_setting(db, "max_positions", "10"))
+        max_pos      = _effective_max_positions(db, mode)
 
         if auto_execute and market_open and len(positions) < max_pos:
             for sym in watchlist:

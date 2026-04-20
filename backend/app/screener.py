@@ -1,9 +1,11 @@
 """
 Sunday screener: scans a configurable universe of stocks using the Minervini
-8-point SEPA criteria, selects top 10 candidates, generates a weekly trading
+8-point SEPA criteria, selects top candidates, generates a weekly trading
 plan, and saves it to the weekly_plan table.
 
 Uses TradingView's scanner API — all symbols fetched in one batch request.
+Live accounts automatically apply graduated conservative filters based on
+account size — no manual settings changes needed as the account grows.
 """
 import logging
 from datetime import date, timedelta
@@ -48,14 +50,9 @@ DEFAULT_UNIVERSE = list(dict.fromkeys(DEFAULT_UNIVERSE))
 
 
 def _next_monday() -> date:
-    today = date.today()
-    days_ahead = 7 - today.weekday()  # Monday = 0, so 7 - 0 = 7 next Monday
-    if days_ahead == 7 and today.weekday() == 0:
-        days_ahead = 7  # already Monday, plan for next Monday
-    # If Sunday (6), days_ahead = 1 → next Monday is tomorrow
+    today      = date.today()
     days_ahead = (7 - today.weekday()) % 7 or 7
     return today + timedelta(days=days_ahead)
-
 
 
 def _generate_rationale(symbol: str, result: dict) -> str:
@@ -63,7 +60,7 @@ def _generate_rationale(symbol: str, result: dict) -> str:
     signal = result.get("signal", "")
     price  = result.get("price") or 0
     w52h   = result.get("week52_high") or 0
-    w52l   = result.get("week52_low") or 0
+    w52l   = result.get("week52_low")  or 0
 
     parts = [f"Score {score}/8 — {signal}."]
     if price and w52h:
@@ -84,6 +81,10 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     Scan the stock universe, select top-N SEPA candidates, save to
     weekly_plan table, and update the watchlist setting.
     Returns a list of plan row dicts.
+
+    Paper accounts use settings as configured — no overrides.
+    Live accounts apply graduated limits from get_live_account_limits()
+    which automatically unlock as the account grows across tier boundaries.
     """
     if mode is None:
         mode = get_setting(db, "trading_mode", "paper")
@@ -91,16 +92,62 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     risk_pct = float(get_setting(db, "risk_pct", "2.0"))
     stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
 
-    # --- Screener filter settings ---
-    price_min        = float(get_setting(db, "screener_price_min",      "0")   or "0")
-    price_max        = float(get_setting(db, "screener_price_max",      "0")   or "0")
-    top_n            = int(  get_setting(db, "screener_top_n",          "10")  or "10")
-    min_score_floor  = int(  get_setting(db, "screener_min_score",      "0")   or "0")
-    vol_surge_pct    = float(get_setting(db, "screener_vol_surge_pct",  "40")  or "40")
-    ema20_pct        = float(get_setting(db, "screener_ema20_pct",      "2.0") or "2.0")
-    ema50_pct        = float(get_setting(db, "screener_ema50_pct",      "3.0") or "3.0")
+    # --- Screener filter settings (from DB) ---
+    price_min       = float(get_setting(db, "screener_price_min",     "0")   or "0")
+    price_max       = float(get_setting(db, "screener_price_max",     "0")   or "0")
+    top_n           = int(  get_setting(db, "screener_top_n",         "10")  or "10")
+    min_score_floor = int(  get_setting(db, "screener_min_score",     "0")   or "0")
+    vol_surge_pct   = float(get_setting(db, "screener_vol_surge_pct", "40")  or "40")
+    ema20_pct       = float(get_setting(db, "screener_ema20_pct",     "2.0") or "2.0")
+    ema50_pct       = float(get_setting(db, "screener_ema50_pct",     "3.0") or "3.0")
 
-    account = _get_portfolio_value(mode)
+    account_value = _get_portfolio_value(mode)
+    tier_label    = "PAPER"
+
+    # --- Live account graduated overrides ---
+    # Paper accounts skip this block entirely — no impact on paper trading.
+    # Limits re-evaluated on every run, so crossing a tier boundary takes
+    # effect automatically on the next screener execution.
+    if mode == "live":
+        from .database import get_live_account_limits
+        limits     = get_live_account_limits(account_value)
+        tier_label = limits.get("tier", "LIVE")
+
+        logger.info(
+            "Live account tier: %s (portfolio=$%.0f)",
+            tier_label, account_value,
+        )
+
+        # Cap top_n at tier limit
+        if limits.get("screener_top_n") is not None:
+            configured_top_n = top_n
+            top_n = min(top_n, limits["screener_top_n"])
+            if top_n != configured_top_n:
+                logger.info(
+                    "Live [%s]: screener top_n capped at %d (settings=%d)",
+                    tier_label, top_n, configured_top_n,
+                )
+
+        # Apply price floor only if user hasn't already set one
+        lim_price_min = limits.get("screener_price_min") or 0
+        if lim_price_min > 0 and price_min == 0:
+            price_min = lim_price_min
+            logger.info("Live [%s]: price_min set to $%.0f", tier_label, price_min)
+
+        # Apply price ceiling only if user hasn't already set one
+        lim_price_max = limits.get("screener_price_max") or 0
+        if lim_price_max > 0 and price_max == 0:
+            price_max = lim_price_max
+            logger.info("Live [%s]: price_max set to $%.0f", tier_label, price_max)
+
+        # Raise min_score_floor to tier minimum if not already higher
+        floor_from_limits = limits.get("min_score_floor", 0)
+        if floor_from_limits > min_score_floor:
+            logger.info(
+                "Live [%s]: min_score_floor raised from %d to %d",
+                tier_label, min_score_floor, floor_from_limits,
+            )
+            min_score_floor = floor_from_limits
 
     universe_raw = get_setting(db, "screener_universe", "")
     universe = (
@@ -109,10 +156,18 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
         else DEFAULT_UNIVERSE
     )
 
-    logger.info("Screener: scanning %d symbols via TradingView (mode=%s)...", len(universe), mode)
+    logger.info(
+        "Screener: scanning %d symbols via TradingView (mode=%s, tier=%s, account=$%.0f)...",
+        len(universe), mode, tier_label, account_value,
+    )
 
     # Single batch call — all symbols in one TradingView scanner request
-    results_map = batch_analyze(universe, vol_surge_pct=vol_surge_pct, ema20_pct=ema20_pct, ema50_pct=ema50_pct)
+    results_map = batch_analyze(
+        universe,
+        vol_surge_pct=vol_surge_pct,
+        ema20_pct=ema20_pct,
+        ema50_pct=ema50_pct,
+    )
 
     # Build scored list; apply price filter
     all_scored = []
@@ -134,8 +189,8 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     errors    = sum(1 for r in results_map.values() if r.get("signal") in ("ERROR", "INSUFFICIENT_DATA"))
     top_score = all_scored[0]["score"] if all_scored else 0
 
-    # Adaptive threshold — max score via TV scanner is 6/8.
-    # If user set a manual floor, respect it; otherwise step down until 5+ candidates.
+    # Adaptive threshold — if user/tier set a floor, respect it.
+    # Otherwise step down until 5+ candidates found.
     if min_score_floor > 0:
         candidates = [c for c in all_scored if c["score"] >= min_score_floor]
     else:
@@ -150,8 +205,9 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     effective_min = min_score_floor if min_score_floor > 0 else (
         next((s for s in (6, 5, 4, 3) if len([c for c in all_scored if c["score"] >= s]) >= 5), 3)
     )
+
     summary_msg = (
-        f"Screener: scanned {len(universe)}, "
+        f"Screener ({mode}/{tier_label}): scanned {len(universe)}, "
         f"errors {errors}, "
         f"scored {len(all_scored)}, "
         f"qualifying (>={effective_min}) {len(candidates)}, "
@@ -159,9 +215,12 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
         f"Top score: {top_score}/8."
     )
     if price_min > 0 or price_max > 0:
-        summary_msg += f" Price filter: ${price_min:.0f}–${price_max:.0f}." if price_max > 0 else f" Price min: ${price_min:.0f}."
+        if price_max > 0:
+            summary_msg += f" Price filter: ${price_min:.0f}–${price_max:.0f}."
+        else:
+            summary_msg += f" Price min: ${price_min:.0f}."
 
-    # If high error rate, surface a sample error to aid debugging
+    # Surface sample errors if error rate is high
     if errors > len(universe) * 0.5:
         sample_errors = [
             f"{sym}: {r['error']}"
@@ -175,16 +234,16 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     _log_alert(db, "INFO", summary_msg)
 
     week_start   = _next_monday()
-    risk_dollars = account * (risk_pct / 100)
+    risk_dollars = account_value * (risk_pct / 100)
     plan_rows    = []
 
     for rank, c in enumerate(top_picks, 1):
-        price   = float(c["price"])
-        stop    = round(price * (1 - stop_pct / 100), 4)
-        target1 = round(price * (1 + stop_pct * 2 / 100), 4)
-        target2 = round(price * (1 + stop_pct * 3 / 100), 4)
-        stop_d  = price - stop
-        shares  = int(risk_dollars / stop_d) if stop_d > 0 else 0
+        price    = float(c["price"])
+        stop     = round(price * (1 - stop_pct / 100), 4)
+        target1  = round(price * (1 + stop_pct * 2 / 100), 4)
+        target2  = round(price * (1 + stop_pct * 3 / 100), 4)
+        stop_d   = price - stop
+        shares   = int(risk_dollars / stop_d) if stop_d > 0 else 0
         risk_amt = round(shares * stop_d, 2)
 
         plan_rows.append({
@@ -209,7 +268,7 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
     set_setting(db, "screener_last_run", summary_msg)
 
     if plan_rows:
-        top_symbols   = [r["symbol"] for r in plan_rows]
+        top_symbols = [r["symbol"] for r in plan_rows]
         set_setting(db, "watchlist", ",".join(top_symbols))
 
         tv_user = get_setting(db, "tv_username", "")
@@ -222,7 +281,10 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
             else:
                 logger.warning("TradingView sync failed: %s", tv_result["error"])
 
-    logger.info("Screener complete. Week of %s. Plan: %s", week_start, [r["symbol"] for r in plan_rows])
+    logger.info(
+        "Screener complete. Week of %s. Tier: %s. Plan: %s",
+        week_start, tier_label, [r["symbol"] for r in plan_rows],
+    )
     return plan_rows
 
 
@@ -243,7 +305,7 @@ def _get_portfolio_value(mode: str) -> float:
         acct = alp.get_account(mode)
         return float(acct.portfolio_value)
     except Exception:
-        return 10000.0
+        return 10_000.0
 
 
 def _save_plan(db: Session, rows: list[dict], week_start: str, mode: str):

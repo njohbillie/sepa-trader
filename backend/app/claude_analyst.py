@@ -1,5 +1,6 @@
 """
-Claude AI analyst — pre-trade safety gate + post-close evaluation + weekly pick review.
+Claude AI analyst — pre-trade safety gate + post-close evaluation +
+weekly pick review + midweek slot-refill analysis.
 """
 import logging
 from sqlalchemy import text
@@ -19,12 +20,12 @@ def _client(api_key: str):
 def pre_trade_analysis(
     db: Session,
     symbol: str,
-    side: str,                  # "BUY" or "SELL"
+    side: str,
     qty: float,
     entry_price: float,
     stop_price: float,
     target_price: float,
-    trigger: str,               # "MONDAY_OPEN", "POST_CLOSE", "BREAKOUT", etc.
+    trigger: str,
     portfolio_value: float,
     cash: float,
     buying_power: float,
@@ -32,18 +33,18 @@ def pre_trade_analysis(
 ) -> dict:
     """
     Ask Claude to evaluate a proposed trade before it is placed.
+    Live accounts use graduated tier thresholds from get_live_account_limits().
+    Paper accounts always use standard thresholds regardless of balance.
 
     Returns:
         {
-            "proceed":  bool,       # True = safe to place, False = abort
-            "verdict":  str,        # "PROCEED" | "ABORT" | "WARN"
-            "reason":   str,        # one-line explanation
-            "warnings": [str],      # any flags even if proceeding
-            "analysis": str,        # full Claude response text
+            "proceed":  bool,
+            "verdict":  str,    # "PROCEED" | "ABORT" | "WARN"
+            "reason":   str,
+            "warnings": [str],
+            "analysis": str,
         }
-
-    If Claude API key is not set, returns proceed=True with a warning so
-    trading is never silently blocked by a missing config.
+    Fails open — never silently blocks trading due to API errors.
     """
     api_key = get_setting(db, "claude_api_key", "")
     if not api_key:
@@ -58,15 +59,33 @@ def pre_trade_analysis(
 
     model = get_setting(db, "claude_model", "claude-sonnet-4-5")
 
+    # Live accounts get graduated tier thresholds — paper always uses standard
+    if mode == "live":
+        from .database import get_live_account_limits
+        limits       = get_live_account_limits(portfolio_value)
+        account_tier = f"LIVE — {limits['tier']}"
+    else:
+        limits = {
+            "max_position_pct": 20.0,
+            "min_cash_pct":     10.0,
+            "max_risk_pct":     2.0,
+            "tier":             "PAPER",
+        }
+        account_tier = "PAPER — standard limits (practice account)"
+
+    max_position_pct = limits["max_position_pct"]
+    min_cash_pct     = limits["min_cash_pct"]
+    max_risk_pct     = limits["max_risk_pct"]
+
     # Position sizing metrics
     trade_cost       = round(qty * entry_price, 2)
     risk_per_share   = round(entry_price - stop_price, 4) if stop_price > 0 else 0
     risk_dollars     = round(qty * risk_per_share, 2)
-    reward_dollars   = round(qty * (target_price - entry_price), 2) if target_price > 0 else 0
     rr               = round((target_price - entry_price) / risk_per_share, 2) if risk_per_share > 0 else 0
     pct_of_portfolio = round((trade_cost / portfolio_value) * 100, 2) if portfolio_value > 0 else 0
     pct_of_cash      = round((trade_cost / cash) * 100, 2) if cash > 0 else 999
     risk_pct_port    = round((risk_dollars / portfolio_value) * 100, 2) if portfolio_value > 0 else 0
+    cash_after_pct   = round(((cash - trade_cost) / portfolio_value) * 100, 2) if portfolio_value > 0 else 0
 
     prompt = f"""You are a risk management AI for a Minervini SEPA swing trading system.
 Evaluate this proposed trade and respond in EXACTLY this format — no other text:
@@ -89,20 +108,22 @@ Trade cost:      ${trade_cost:,.2f}
 Risk $:          ${risk_dollars:,.2f}  ({risk_pct_port:.2f}% of portfolio)
 % of portfolio:  {pct_of_portfolio:.1f}%
 % of cash:       {pct_of_cash:.1f}%
+Cash after trade:{cash_after_pct:.1f}% of portfolio
 
 --- ACCOUNT STATE ---
 Portfolio value: ${portfolio_value:,.2f}
 Cash available:  ${cash:,.2f}
 Buying power:    ${buying_power:,.2f}
+Account tier:    {account_tier}
 
---- RULES (abort if violated) ---
+--- RULES (thresholds set by account tier) ---
 1. R:R must be >= 2.0x. Current: {rr:.2f}x
-2. Risk per trade must be <= 2% of portfolio. Current: {risk_pct_port:.2f}%
+2. Risk per trade must be <= {max_risk_pct}% of portfolio. Current: {risk_pct_port:.2f}%
 3. Trade cost must not exceed buying power. Cost: ${trade_cost:,.2f}, BP: ${buying_power:,.2f}
-4. Single position must not exceed 20% of portfolio. Current: {pct_of_portfolio:.1f}%
-5. Cash after trade must remain >= 10% of portfolio.
+4. Single position must not exceed {max_position_pct}% of portfolio. Current: {pct_of_portfolio:.1f}%
+5. Cash after trade must remain >= {min_cash_pct}% of portfolio. After trade: {cash_after_pct:.1f}%
 
-Use WARN (not ABORT) for borderline cases (R:R between 1.5-2.0, size 15-20%).
+Use WARN for borderline cases (R:R 1.5–2.0, size near the limit).
 Use ABORT only for clear rule violations.
 Use PROCEED when all rules pass."""
 
@@ -112,12 +133,10 @@ Use PROCEED when all rules pass."""
             max_tokens=256,
             messages=[{"role": "user", "content": prompt}],
         )
-        text_raw = resp.content[0].text.strip()
-        return _parse_pre_trade_response(text_raw)
+        return _parse_pre_trade_response(resp.content[0].text.strip())
 
     except Exception as exc:
         logger.error("pre_trade_analysis failed for %s: %s", symbol, exc)
-        # Fail open — don't block trades if Claude is unreachable
         return {
             "proceed":  True,
             "verdict":  "PROCEED",
@@ -128,7 +147,6 @@ Use PROCEED when all rules pass."""
 
 
 def _parse_pre_trade_response(text: str) -> dict:
-    """Parse Claude's structured pre-trade response."""
     verdict  = "PROCEED"
     reason   = ""
     warnings = []
@@ -146,9 +164,8 @@ def _parse_pre_trade_response(text: str) -> dict:
             if w.lower() != "none":
                 warnings = [x.strip() for x in w.split(",") if x.strip()]
 
-    proceed = verdict in ("PROCEED", "WARN")
     return {
-        "proceed":  proceed,
+        "proceed":  verdict in ("PROCEED", "WARN"),
         "verdict":  verdict,
         "reason":   reason,
         "warnings": warnings,
@@ -165,7 +182,6 @@ def log_pre_trade(
     analysis: str,
     mode: str,
 ):
-    """Persist pre-trade analysis result to ai_analysis_log."""
     db.execute(
         text("""
             INSERT INTO ai_analysis_log (trigger, symbol, analysis, mode)
@@ -181,7 +197,165 @@ def log_pre_trade(
     db.commit()
 
 
-# ── Post-close / weekly analysis ─────────────────────────────────────────────
+# ── Slot-refill analysis ──────────────────────────────────────────────────────
+
+def analyze_slot_refill(
+    db: Session,
+    closed_symbol: str,
+    close_reason: str,
+    entry_price: float | None,
+    close_price: float | None,
+    portfolio_value: float,
+    cash: float,
+    buying_power: float,
+    open_positions: list[str],
+    pending_picks: list[dict],
+    mode: str,
+) -> dict:
+    """
+    Midweek slot-refill analysis. Decides whether to open a replacement
+    position after a close, and which pick to prioritize if so.
+
+    Returns:
+        {
+            "should_open": bool,
+            "symbol":      str | None,
+            "verdict":     str,   # "OPEN" | "WAIT" | "SKIP_WEEK"
+            "reason":      str,
+            "analysis":    str,
+        }
+    """
+    api_key = get_setting(db, "claude_api_key", "")
+    if not api_key:
+        logger.warning("analyze_slot_refill: no Claude API key — defaulting to auto-execute.")
+        return {
+            "should_open": True,
+            "symbol":      pending_picks[0]["symbol"] if pending_picks else None,
+            "verdict":     "OPEN",
+            "reason":      "Claude API key not configured — defaulting to next PENDING pick.",
+            "analysis":    "",
+        }
+
+    model = get_setting(db, "claude_model", "claude-sonnet-4-5")
+
+    pnl     = None
+    pnl_pct = None
+    if entry_price and close_price:
+        pnl     = round(close_price - entry_price, 2)
+        pnl_pct = round((pnl / entry_price) * 100, 2)
+
+    closed_block = f"Symbol:       {closed_symbol}\nClose reason: {close_reason.replace('_', ' ').title()}\n"
+    if entry_price:
+        closed_block += f"Entry:        ${entry_price:.2f}\n"
+    if close_price:
+        closed_block += f"Close price:  ${close_price:.2f}\n"
+    if pnl is not None:
+        closed_block += f"P&L:          ${pnl:+.2f} ({pnl_pct:+.2f}%)\n"
+
+    if pending_picks:
+        pick_lines = []
+        for i, p in enumerate(pending_picks, 1):
+            ep = float(p.get("entry_price") or 0)
+            sp = float(p.get("stop_price")  or 0)
+            t1 = float(p.get("target1")     or 0)
+            rr = round((t1 - ep) / (ep - sp), 2) if ep > sp > 0 and t1 > ep else "N/A"
+            pick_lines.append(
+                f"  {i}. {p['symbol']:6s}  score={p.get('score','?')}/8  "
+                f"signal={p.get('signal','?'):20s}  entry=${ep:.2f}  "
+                f"stop=${sp:.2f}  target=${t1:.2f}  R:R={rr}x  "
+                f"note: {str(p.get('rationale',''))[:80]}"
+            )
+        picks_block = "\n".join(pick_lines)
+    else:
+        picks_block = "  (none remaining)"
+
+    prompt = f"""You are a risk management AI for a Minervini SEPA swing trading system.
+A position just closed midweek. Decide whether to open a replacement position.
+Respond in EXACTLY this format — no other text:
+
+VERDICT: <OPEN|WAIT|SKIP_WEEK>
+SYMBOL: <ticker or NONE>
+REASON: <one sentence ≤25 words>
+
+--- CLOSED POSITION ---
+{closed_block}
+--- ACCOUNT STATE ---
+Portfolio value:  ${portfolio_value:,.2f}
+Cash available:   ${cash:,.2f}
+Buying power:     ${buying_power:,.2f}
+Open positions:   {', '.join(open_positions) if open_positions else 'none'} ({len(open_positions)} held)
+
+--- PENDING PICKS THIS WEEK ---
+{picks_block}
+
+--- DECISION RULES ---
+Use OPEN when:
+  - Close was a target hit AND a quality pick exists (score ≥5, R:R ≥2)
+  - Cash covers the next pick's entry with ≥15% cash buffer remaining
+  - Not Thursday or Friday (insufficient time for setup to work)
+
+Use WAIT when:
+  - Close was a stop hit — wait for a better setup rather than chasing
+  - Best available pick has score <5 or R:R <2
+  - Cash would drop below 10% of portfolio after the trade
+  - It is Thursday or Friday
+
+Use SKIP_WEEK when:
+  - All remaining picks are low quality (score <4)
+  - Multiple stops hit this week — capital preservation mode
+  - No picks remain
+
+If OPEN: choose the highest-ranked pick with score ≥5 and R:R ≥2.
+If WAIT or SKIP_WEEK: SYMBOL must be NONE."""
+
+    try:
+        resp = _client(api_key).messages.create(
+            model=model,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return _parse_slot_refill_response(resp.content[0].text.strip(), pending_picks)
+
+    except Exception as exc:
+        logger.error("analyze_slot_refill failed: %s — defaulting to next pick.", exc)
+        return {
+            "should_open": True,
+            "symbol":      pending_picks[0]["symbol"] if pending_picks else None,
+            "verdict":     "OPEN",
+            "reason":      f"Claude error — defaulting to next pick: {str(exc)[:60]}",
+            "analysis":    "",
+        }
+
+
+def _parse_slot_refill_response(text: str, pending_picks: list[dict]) -> dict:
+    verdict       = "WAIT"
+    symbol        = None
+    reason        = ""
+    valid_symbols = {p["symbol"] for p in pending_picks}
+
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("VERDICT:"):
+            v = line.split(":", 1)[1].strip().upper()
+            if v in ("OPEN", "WAIT", "SKIP_WEEK"):
+                verdict = v
+        elif line.startswith("SYMBOL:"):
+            s = line.split(":", 1)[1].strip().upper()
+            if s != "NONE" and s in valid_symbols:
+                symbol = s
+        elif line.startswith("REASON:"):
+            reason = line.split(":", 1)[1].strip()
+
+    return {
+        "should_open": verdict == "OPEN" and symbol is not None,
+        "symbol":      symbol,
+        "verdict":     verdict,
+        "reason":      reason,
+        "analysis":    text,
+    }
+
+
+# ── Post-close / weekly pick analysis ────────────────────────────────────────
 
 def analyze_picks(db: Session, picks: list[dict], closed_position: dict | None = None) -> str:
     api_key = get_setting(db, "claude_api_key", "")
@@ -202,8 +376,8 @@ def analyze_picks(db: Session, picks: list[dict], closed_position: dict | None =
     lines = []
     for i, p in enumerate(picks, 1):
         ep = p.get("entry_price") or 0
-        sp = p.get("stop_price") or 0
-        t1 = p.get("target1") or 0
+        sp = p.get("stop_price")  or 0
+        t1 = p.get("target1")     or 0
         rr = round((t1 - ep) / (ep - sp), 2) if ep > sp > 0 and t1 > ep else "N/A"
         lines.append(
             f"{i}. {p['symbol']}  score={p.get('score','?')}/6  signal={p.get('signal','?')}"
