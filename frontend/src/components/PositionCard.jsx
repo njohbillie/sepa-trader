@@ -2,6 +2,7 @@ import { useState } from 'react'
 import SignalBadge from './SignalBadge'
 import { closePosition } from '../api/client'
 import { useQueryClient } from 'react-query'
+import axios from 'axios'
 
 function pct(n) { return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%` }
 function usd(n, sign=false) {
@@ -10,12 +11,18 @@ function usd(n, sign=false) {
 }
 
 export default function PositionCard({ pos }) {
-  const qc      = useQueryClient()
-  const [closing, setClosing] = useState(false)
-  const isProfit  = pos.unrealized_pl >= 0
-  const plColor   = isProfit ? 'text-emerald-400' : 'text-red-400'
-  const urgent    = pos.signal === 'NO_SETUP'
-  const breakout  = pos.signal === 'BREAKOUT'
+  const qc                      = useQueryClient()
+  const [closing, setClosing]   = useState(false)
+  const [editExits, setEditExits] = useState(false)
+  const [stop, setStop]         = useState('')
+  const [target, setTarget]     = useState('')
+  const [saving, setSaving]     = useState(false)
+  const [exitMsg, setExitMsg]   = useState(null)
+
+  const isProfit = pos.unrealized_pl >= 0
+  const plColor  = isProfit ? 'text-emerald-400' : 'text-red-400'
+  const urgent   = pos.signal === 'NO_SETUP'
+  const breakout = pos.signal === 'BREAKOUT'
 
   async function handleClose() {
     if (!confirm(`Close ${pos.symbol}?`)) return
@@ -25,6 +32,36 @@ export default function PositionCard({ pos }) {
       qc.invalidateQueries('positions')
     }
   }
+
+  async function handleSetExits() {
+    const s = parseFloat(stop)
+    const t = parseFloat(target)
+    if (!s || !t || s <= 0 || t <= 0) {
+      setExitMsg({ type: 'error', text: 'Enter valid stop and target prices.' })
+      return
+    }
+    if (t <= s) {
+      setExitMsg({ type: 'error', text: 'Target must be above stop.' })
+      return
+    }
+    setSaving(true)
+    setExitMsg(null)
+    try {
+      await axios.patch(`/api/positions/${pos.symbol}/exits?stop=${s}&target=${t}`)
+      setExitMsg({ type: 'ok', text: `Saved — stop $${s.toFixed(2)}, target $${t.toFixed(2)}. Exit orders will be placed on next monitor cycle.` })
+      setEditExits(false)
+      setStop('')
+      setTarget('')
+    } catch (err) {
+      setExitMsg({ type: 'error', text: err?.response?.data?.detail || 'Failed to save exit levels.' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const rr = stop && target
+    ? ((parseFloat(target) - pos.entry_price) / (pos.entry_price - parseFloat(stop))).toFixed(1)
+    : null
 
   return (
     <div className={`bg-card border rounded-xl p-5 flex flex-col gap-4 transition-all ${
@@ -57,9 +94,9 @@ export default function PositionCard({ pos }) {
 
       {/* EMA levels */}
       <div className="grid grid-cols-3 gap-2 text-xs">
-        <EmaRow label="EMA 20"  value={pos.ema20}  current={pos.current_price} />
-        <EmaRow label="EMA 50"  value={pos.ema50}  current={pos.current_price} />
-        <EmaRow label="52W Hi"  value={pos.week52_high} current={pos.current_price} noColor />
+        <EmaRow label="EMA 20" value={pos.ema20}      current={pos.current_price} />
+        <EmaRow label="EMA 50" value={pos.ema50}      current={pos.current_price} />
+        <EmaRow label="52W Hi" value={pos.week52_high} current={pos.current_price} noColor />
       </div>
 
       {/* Score bar */}
@@ -70,13 +107,81 @@ export default function PositionCard({ pos }) {
         </div>
         <div className="h-1.5 bg-surface rounded-full overflow-hidden">
           <div
-            className={`h-full rounded-full transition-all ${pos.score >= 7 ? 'bg-emerald-500' : pos.score >= 5 ? 'bg-yellow-500' : 'bg-red-500'}`}
+            className={`h-full rounded-full transition-all ${
+              pos.score >= 7 ? 'bg-emerald-500' :
+              pos.score >= 5 ? 'bg-yellow-500'  : 'bg-red-500'
+            }`}
             style={{ width: `${(pos.score / 8) * 100}%` }}
           />
         </div>
       </div>
 
-      {/* Actions */}
+      {/* Exit levels */}
+      <div className="border-t border-border/50 pt-3 space-y-2">
+        <button
+          onClick={() => { setEditExits(e => !e); setExitMsg(null) }}
+          className="flex items-center gap-1.5 text-xs text-yellow-400 hover:text-yellow-300 transition-colors"
+        >
+          <span className={`inline-block transition-transform ${editExits ? 'rotate-90' : ''}`}>▶</span>
+          {editExits ? 'Cancel' : 'Set Stop / Target'}
+        </button>
+
+        {editExits && (
+          <div className="space-y-2">
+            <div className="flex gap-2 items-center flex-wrap">
+              <div className="flex flex-col gap-0.5">
+                <label className="text-[10px] text-slate-500 uppercase tracking-wider">Stop Price</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  placeholder="0.00"
+                  value={stop}
+                  onChange={e => setStop(e.target.value)}
+                  className="w-28 px-2 py-1.5 text-xs rounded-lg bg-slate-700 text-slate-200 border border-slate-600 focus:border-red-400 focus:outline-none"
+                />
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <label className="text-[10px] text-slate-500 uppercase tracking-wider">Target Price</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  placeholder="0.00"
+                  value={target}
+                  onChange={e => setTarget(e.target.value)}
+                  className="w-28 px-2 py-1.5 text-xs rounded-lg bg-slate-700 text-slate-200 border border-slate-600 focus:border-emerald-400 focus:outline-none"
+                />
+              </div>
+              {rr && (
+                <div className="flex flex-col gap-0.5 mt-4">
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider">R:R</label>
+                  <span className={`text-xs font-semibold ${parseFloat(rr) >= 2 ? 'text-emerald-400' : 'text-yellow-400'}`}>
+                    {rr}x
+                  </span>
+                </div>
+              )}
+              <button
+                onClick={handleSetExits}
+                disabled={saving}
+                className="mt-4 px-3 py-1.5 text-xs rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-medium disabled:opacity-50 transition-colors"
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+
+            <p className="text-[10px] text-slate-500">
+              Entry: {usd(pos.entry_price)} — exit orders placed automatically on next monitor cycle.
+            </p>
+          </div>
+        )}
+
+        {exitMsg && (
+          <p className={`text-xs ${exitMsg.type === 'error' ? 'text-red-400' : 'text-emerald-400'}`}>
+            {exitMsg.text}
+          </p>
+        )}
+      </div>
+
+      {/* Close button — shown when signal is NO_SETUP */}
       {urgent && (
         <button
           onClick={handleClose}
@@ -91,9 +196,14 @@ export default function PositionCard({ pos }) {
 }
 
 function EmaRow({ label, value, current, noColor }) {
-  if (!value) return <div className="bg-surface rounded p-2"><div className="text-slate-400">{label}</div><div>—</div></div>
+  if (!value) return (
+    <div className="bg-surface rounded p-2">
+      <div className="text-slate-400">{label}</div>
+      <div>—</div>
+    </div>
+  )
   const above = current > value
-  const color  = noColor ? 'text-slate-300' : above ? 'text-emerald-400' : 'text-red-400'
+  const color = noColor ? 'text-slate-300' : above ? 'text-emerald-400' : 'text-red-400'
   return (
     <div className="bg-surface rounded p-2">
       <div className="text-slate-400 mb-0.5">{label}</div>
