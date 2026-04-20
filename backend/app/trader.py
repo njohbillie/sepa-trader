@@ -39,19 +39,36 @@ def _get_weekly_plan_exits(db: Session, symbol: str) -> tuple[float, float]:
     return float(row[0] or 0), float(row[1] or 0)
 
 
-def _symbols_with_open_sell_orders(open_orders_by_symbol: dict) -> set[str]:
+def _classify_exit_orders(open_orders_by_symbol: dict) -> tuple[set[str], set[str]]:
     """
-    Return set of symbols that already have at least one open SELL order
-    (stop or limit) — meaning exit strategy is already in place.
+    Inspect open orders per symbol and return two sets:
+      - oco_covered:      symbols that have a proper OCO or bracket exit in place
+      - orphan_order_ids: order IDs of standalone sell orders that need to be
+                          cancelled before placing an OCO (they block the stop leg)
+
+    An OCO/bracket order has order_class of 'oco', 'bracket', or 'oto'.
+    A standalone sell (limit or stop without a paired leg) is an orphan.
     """
-    covered = set()
+    oco_covered      = set()
+    orphan_order_ids = {}   # symbol -> [order_id, ...]
+
     for sym, orders in open_orders_by_symbol.items():
         for o in orders:
-            side = str(o.side).lower()
-            if "sell" in side:
-                covered.add(sym)
-                break
-    return covered
+            order_class = str(getattr(o, 'order_class', '') or '').lower()
+            side        = str(getattr(o, 'side', '') or '').lower()
+
+            is_sell = 'sell' in side
+            is_oco  = any(kw in order_class for kw in ('oco', 'bracket', 'oto'))
+
+            if is_sell and is_oco:
+                oco_covered.add(sym)
+                break   # fully covered — no need to inspect further
+
+            if is_sell and not is_oco:
+                # Orphaned standalone sell — needs to be cancelled
+                orphan_order_ids.setdefault(sym, []).append(str(o.id))
+
+    return oco_covered, orphan_order_ids
 
 
 def _ensure_exit_orders(
@@ -61,36 +78,50 @@ def _ensure_exit_orders(
     mode: str,
 ):
     """
-    For every live position that has NO open sell orders, look up the weekly
-    plan and immediately place stop + target exit orders. This repairs positions
-    whose bracket legs expired due to the DAY TIF bug.
+    For every live position that does NOT have a proper OCO exit order:
+      1. Cancel any orphaned standalone sell orders (they prevent the stop leg)
+      2. Look up stop/target from the weekly plan
+      3. Place a fresh OCO exit order
+
+    This repairs positions broken by the old DAY TIF bug or the previous
+    two-independent-orders approach.
     """
-    covered = _symbols_with_open_sell_orders(open_orders_by_symbol)
+    oco_covered, orphan_order_ids = _classify_exit_orders(open_orders_by_symbol)
+    client = alp.get_client(mode)
 
     for pos in positions:
         sym = pos.symbol
-        if sym in covered:
-            continue  # exit orders already active
 
-        qty = float(pos.qty)
+        if sym in oco_covered:
+            continue  # OCO already in place — nothing to do
+
+        # Cancel any orphaned standalone sell orders first
+        orphans = orphan_order_ids.get(sym, [])
+        for oid in orphans:
+            try:
+                client.cancel_order_by_id(oid)
+                logger.info("Exit guard: cancelled orphaned sell order %s for %s", oid, sym)
+            except Exception as exc:
+                logger.warning("Exit guard: could not cancel order %s for %s: %s", oid, sym, exc)
+
+        qty  = float(pos.qty)
         stop, target = _get_weekly_plan_exits(db, sym)
 
         if stop <= 0 or target <= 0:
             logger.warning(
-                "Exit guard: %s has no open sell orders but weekly plan "
-                "has no stop/target — skipping. Manual review needed.", sym
+                "Exit guard: %s has no OCO exit but weekly plan has no stop/target "
+                "— skipping. Use 'Set Stop / Target' on the position card.", sym
             )
             continue
 
         try:
             alp.place_oca_exit(sym, qty, stop, target, mode)
             logger.info(
-                "Exit guard: placed stop=$%.2f + target=$%.2f for %s (qty=%.0f) "
-                "— exit orders were missing.",
-                stop, target, sym, qty,
+                "Exit guard: placed OCO exit for %s qty=%.0f stop=$%.2f target=$%.2f",
+                sym, qty, stop, target,
             )
         except Exception as exc:
-            logger.error("Exit guard: failed to place exit orders for %s: %s", sym, exc)
+            logger.error("Exit guard: failed to place OCO exit for %s: %s", sym, exc)
 
 
 async def run_monitor(db: Session):
@@ -100,7 +131,7 @@ async def run_monitor(db: Session):
     stop_pct     = float(get_setting(db, "stop_loss_pct", "8.0"))
 
     try:
-        clock = alp.get_clock(mode)
+        clock       = alp.get_clock(mode)
         market_open = clock.is_open
 
         acct      = alp.get_account(mode)
@@ -109,8 +140,9 @@ async def run_monitor(db: Session):
         day_pnl   = float(acct.equity) - float(acct.last_equity)
 
         # ── Exit guard ────────────────────────────────────────────────────────
-        # Before evaluating signals, ensure every live position has active
-        # stop + target orders. Repairs positions broken by the DAY TIF bug.
+        # Runs every cycle while market is open. Cancels orphaned standalone
+        # sell orders and replaces them with proper OCO exits. Also catches
+        # positions with no exit orders at all.
         if market_open:
             try:
                 open_orders_by_symbol = alp.get_open_orders_by_symbol(mode)
@@ -145,7 +177,7 @@ async def run_monitor(db: Session):
 
             results.append({"sym": sym, "signal": signal})
 
-        # Check watchlist for new breakout entries (symbols not yet held)
+        # Check watchlist for new breakout entries
         held_symbols = {p.symbol for p in positions}
         watchlist    = _get_watchlist(db)
         max_pos      = int(get_setting(db, "max_positions", "10"))
@@ -162,7 +194,6 @@ async def run_monitor(db: Session):
                     price = result["price"]
                     qty   = _size_position(portfolio, price, risk_pct, stop_pct)
                     if qty >= 1:
-                        # Pull stop/target from weekly plan for bracket order
                         stop, target = _get_weekly_plan_exits(db, sym)
                         try:
                             if stop > 0 and target > 0:
@@ -179,7 +210,6 @@ async def run_monitor(db: Session):
                         except Exception as e:
                             results.append({"sym": sym, "action": "BUY_FAILED", "error": str(e)})
 
-        # Telegram alerts
         if stage2_lost:
             asyncio.create_task(tg.alert_stage2_lost(stage2_lost, mode))
         if new_breakouts:
