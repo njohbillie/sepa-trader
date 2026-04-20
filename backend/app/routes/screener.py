@@ -65,6 +65,47 @@ def trigger_screener(background_tasks: BackgroundTasks, db: Session = Depends(ge
     return {"status": "screener_started", "message": "Screener running in background. Check /weekly-plan in ~2 minutes."}
 
 
+@router.post("/sync-tradingview")
+def sync_tradingview(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Push the current weekly plan symbols to TradingView weekly_picks watchlist."""
+    from ..database import get_setting
+
+    tv_user = get_setting(db, "tv_username", "")
+    tv_pass = get_setting(db, "tv_password", "")
+    if not tv_user or not tv_pass:
+        from fastapi import HTTPException
+        raise HTTPException(400, "TradingView credentials not configured in Settings.")
+
+    rows = db.execute(
+        text("""
+            SELECT symbol FROM weekly_plan
+            WHERE week_start = (SELECT MAX(week_start) FROM weekly_plan)
+            ORDER BY rank ASC
+        """)
+    ).fetchall()
+    symbols = [r[0] for r in rows]
+    if not symbols:
+        from fastapi import HTTPException
+        raise HTTPException(404, "No weekly plan found. Run the screener first.")
+
+    def _sync():
+        from ..tradingview_client import update_weekly_picks
+        import logging
+        log = logging.getLogger(__name__)
+        result = update_weekly_picks(tv_user, tv_pass, symbols)
+        if result["ok"]:
+            log.info("Manual TV sync: weekly_picks %s (%d symbols).", result["action"], result["count"])
+        else:
+            log.error("Manual TV sync failed: %s", result["error"])
+
+    background_tasks.add_task(_sync)
+    return {
+        "status": "sync_started",
+        "symbols": symbols,
+        "message": f"Syncing {len(symbols)} symbols to TradingView weekly_picks watchlist.",
+    }
+
+
 @router.patch("/weekly-plan/{symbol}/status")
 def update_plan_status(symbol: str, body: dict, db: Session = Depends(get_db)):
     """Mark a plan entry as EXECUTED, SKIPPED, etc."""
