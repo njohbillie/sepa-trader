@@ -29,7 +29,7 @@ services:
       - internal
 
   backend:
-    image: njohbillie/sepa-trader-backend:${IMAGE_TAG:-latest}
+    image: njohbillie/sepa-trader-backend:${IMAGE_TAG}
     restart: unless-stopped
     depends_on:
       db:
@@ -51,7 +51,7 @@ services:
       - npm_network
 
   frontend:
-    image: njohbillie/sepa-trader-frontend:${IMAGE_TAG:-latest}
+    image: njohbillie/sepa-trader-frontend:${IMAGE_TAG}
     restart: unless-stopped
     depends_on:
       - backend
