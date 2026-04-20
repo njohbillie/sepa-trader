@@ -47,16 +47,22 @@ export default function WeeklyPlan() {
   const [msgType, setMsgType]       = useState('info')
   const prevStatusRef               = useRef(null)
 
-  const { data: plan = [], isLoading, isError } = useQuery('weeklyPlan', fetchWeeklyPlan, {
-    refetchInterval: 30000,
-  })
+  const { data: plan = [], isLoading, isError } = useQuery(
+    'weeklyPlan',
+    () => fetchWeeklyPlan(),
+    { refetchInterval: 30000 },
+  )
 
-  const { data: status } = useQuery('screenerStatus', fetchScreenerStatus, {
-    refetchInterval: (data) => data?.status === 'running' ? 5000 : 60000,
-  })
+  const { data: status } = useQuery(
+    'screenerStatus',
+    () => fetchScreenerStatus(),
+    { refetchInterval: (data) => data?.status === 'running' ? 5000 : 60000 },
+  )
 
   const { data: analyses = [], refetch: refetchAnalyses } = useQuery(
-    'aiAnalyses', fetchAnalyses, { staleTime: 60000, refetchOnWindowFocus: false },
+    'aiAnalyses',
+    () => fetchAnalyses(),                                          // ← fixed
+    { staleTime: 60000, refetchOnWindowFocus: false },
   )
 
   const weekStart = plan[0]?.week_start
@@ -66,14 +72,14 @@ export default function WeeklyPlan() {
     refetch: refetchDD,
   } = useQuery(
     ['weeklyDD', weekStart],
-    fetchWeeklyDD,
+    () => fetchWeeklyDD(),                                          // ← fixed
     { enabled: plan.length > 0, staleTime: 6 * 60 * 60 * 1000, refetchOnWindowFocus: false },
   )
   const ddMap = Object.fromEntries(ddList.map(d => [d.symbol, d]))
 
   async function handleRefreshDD() {
-    await forceRefreshDD()      // fetches fresh data + updates server-side cache
-    qc.invalidateQueries(['weeklyDD', weekStart])  // re-fetch via normal cached route
+    await forceRefreshDD()
+    qc.invalidateQueries(['weeklyDD', weekStart])
   }
 
   useEffect(() => {
@@ -386,16 +392,16 @@ function DDPanel({ dd, loading, symbol }) {
   }
 
   const metrics = [
-    { label: 'Market Cap',           value: fmtCap(dd.market_cap) },
-    { label: 'P/E TTM',              value: dd.pe_ttm?.toFixed(1)     ?? '—' },
-    { label: 'Fwd P/E',              value: dd.forward_pe?.toFixed(1)  ?? '—' },
-    { label: 'EPS TTM',              value: dd.eps_ttm != null ? `$${dd.eps_ttm.toFixed(2)}` : '—' },
-    { label: 'Rev Growth',           value: fmtPct(dd.revenue_growth),  color: pctColor(dd.revenue_growth)  },
-    { label: 'EPS Growth',           value: fmtPct(dd.earnings_growth), color: pctColor(dd.earnings_growth) },
-    { label: 'Gross Margin',         value: dd.gross_margin != null ? `${(dd.gross_margin * 100).toFixed(1)}%` : '—' },
-    { label: 'Net Margin',           value: dd.net_margin   != null ? `${(dd.net_margin   * 100).toFixed(1)}%` : '—' },
-    { label: 'ROE',                  value: dd.roe          != null ? `${(dd.roe          * 100).toFixed(1)}%` : '—' },
-    { label: 'Debt / Equity',        value: dd.debt_to_equity?.toFixed(1) ?? '—' },
+    { label: 'Market Cap',    value: fmtCap(dd.market_cap) },
+    { label: 'P/E TTM',       value: dd.pe_ttm?.toFixed(1)      ?? '—' },
+    { label: 'Fwd P/E',       value: dd.forward_pe?.toFixed(1)   ?? '—' },
+    { label: 'EPS TTM',       value: dd.eps_ttm != null ? `$${dd.eps_ttm.toFixed(2)}` : '—' },
+    { label: 'Rev Growth',    value: fmtPct(dd.revenue_growth),  color: pctColor(dd.revenue_growth)  },
+    { label: 'EPS Growth',    value: fmtPct(dd.earnings_growth), color: pctColor(dd.earnings_growth) },
+    { label: 'Gross Margin',  value: dd.gross_margin != null ? `${(dd.gross_margin * 100).toFixed(1)}%` : '—' },
+    { label: 'Net Margin',    value: dd.net_margin   != null ? `${(dd.net_margin   * 100).toFixed(1)}%` : '—' },
+    { label: 'ROE',           value: dd.roe          != null ? `${(dd.roe          * 100).toFixed(1)}%` : '—' },
+    { label: 'Debt / Equity', value: dd.debt_to_equity?.toFixed(1) ?? '—' },
   ]
 
   return (
