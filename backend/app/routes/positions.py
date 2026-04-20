@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from ..database import get_db, get_setting
 from .. import alpaca_client as alp
 from ..sepa_analyzer import analyze
-import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/positions", tags=["positions"])
 
@@ -19,8 +21,6 @@ def positions(db: Session = Depends(get_db)):
 
     symbols = [p.symbol for p in raw]
 
-    # DISTINCT ON returns the most recent weekly_plan row per symbol —
-    # current week if it exists, otherwise falls back to the latest historical entry.
     plan_rows = db.execute(
         text("""
             SELECT DISTINCT ON (symbol)
@@ -78,7 +78,7 @@ def close(symbol: str, db: Session = Depends(get_db)):
 
 
 def _upsert_plan_exits(db: Session, symbol: str, stop: float, target: float, mode: str):
-    """Shared helper — upsert stop/target into the current week's plan for a given mode."""
+    """Upsert stop/target into the current week's plan for a given mode."""
     existing = db.execute(
         text("""
             SELECT id FROM weekly_plan
@@ -128,9 +128,8 @@ def set_exit_levels(
     db: Session = Depends(get_db),
 ):
     """
-    Save stop_price and target1 to the current mode's weekly plan.
-    The exit guard will detect the change on the next monitor cycle and
-    replace the existing OCO with the updated levels.
+    Save stop/target to the plan. Exit guard detects the change on
+    the next monitor cycle and replaces the OCO automatically.
     """
     symbol = symbol.upper()
     mode   = get_setting(db, "trading_mode", "paper")
@@ -146,36 +145,65 @@ def place_exits_now(
     db: Session = Depends(get_db),
 ):
     """
-    Save levels to the current mode's weekly plan AND immediately replace
-    any existing exit orders on Alpaca with a fresh OCO at the new levels.
+    Save levels to the plan AND immediately replace any existing exit orders
+    on Alpaca with a fresh OCO at the new levels.
 
-    Cancels ALL open sell orders for the symbol first (including existing OCOs)
-    so Alpaca doesn't reject the new order as an oversell.
+    Process:
+      1. Persist stop/target to weekly_plan
+      2. Cancel ALL open sell orders for the symbol (including existing OCOs)
+      3. Poll until Alpaca confirms orders are fully cancelled
+      4. Place fresh OCO
     """
     symbol = symbol.upper()
     mode   = get_setting(db, "trading_mode", "paper")
 
+    # Step 1 — persist to plan
     _upsert_plan_exits(db, symbol, stop, target, mode)
 
-    # Confirm position still open in the correct account
+    # Step 2 — confirm position is still open
     positions = alp.get_positions(mode)
     pos = next((p for p in positions if p.symbol == symbol), None)
     if not pos:
-        return {"status": "error", "detail": f"No open {mode} position found for {symbol}"}
+        raise HTTPException(
+            status_code=404,
+            detail=f"No open {mode} position found for {symbol}",
+        )
 
     qty = float(pos.qty)
 
-    # Cancel ALL open sell orders — including any existing OCO.
-    # Without this, Alpaca rejects the new OCO as an oversell.
-    try:
-        cancelled = alp.cancel_symbol_exit_orders(symbol, mode)
-        if cancelled:
-            time.sleep(0.6)   # let Alpaca fully process cancellations
-    except Exception as exc:
-        # Non-fatal — attempt the new OCO anyway
-        pass
+    # Step 3 — cancel all existing sell orders
+    cancelled = alp.cancel_symbol_exit_orders(symbol, mode)
+    logger.info(
+        "place_exits_now: cancelled %d sell order(s) for %s [%s]",
+        len(cancelled), symbol, mode,
+    )
 
-    alp.place_oca_exit(symbol, qty, stop, target, mode)
+    if cancelled:
+        # Step 4 — poll until Alpaca confirms orders are gone
+        cleared = alp.wait_for_orders_cancelled(symbol, mode, timeout=6.0, poll_interval=0.4)
+        if not cleared:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Timed out waiting for existing {symbol} orders to cancel. "
+                    "Wait a few seconds and try again."
+                ),
+            )
+
+    # Step 5 — place fresh OCO
+    try:
+        alp.place_oca_exit(symbol, qty, stop, target, mode)
+        logger.info(
+            "place_exits_now: placed OCO for %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
+            symbol, qty, stop, target, mode,
+        )
+    except Exception as exc:
+        logger.error("place_exits_now: OCO placement failed for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Orders were cancelled but new OCO failed to place: {str(exc)[:200]}",
+        )
+
     return {
         "status": "ok",
         "symbol": symbol,

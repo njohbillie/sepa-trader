@@ -155,6 +155,36 @@ def cancel_symbol_exit_orders(symbol: str, mode: str = "paper") -> list[str]:
 
     return cancelled
 
+def wait_for_orders_cancelled(
+    symbol: str,
+    mode: str = "paper",
+    timeout: float = 5.0,
+    poll_interval: float = 0.4,
+) -> bool:
+    """
+    Poll until no open sell orders remain for a symbol, or timeout elapses.
+    Returns True if orders are cleared, False if timeout hit.
+    Used after cancel_symbol_exit_orders() to ensure Alpaca has fully
+    processed the cancellation before placing a replacement OCO.
+    """
+    import time as _time
+    elapsed = 0.0
+    while elapsed < timeout:
+        open_orders = get_open_orders_by_symbol(mode)
+        symbol_orders = open_orders.get(symbol, [])
+        sell_orders = [
+            o for o in symbol_orders
+            if 'sell' in str(getattr(o, 'side', '') or '').lower()
+        ]
+        if not sell_orders:
+            return True
+        _time.sleep(poll_interval)
+        elapsed += poll_interval
+    logger.warning(
+        "wait_for_orders_cancelled: timeout after %.1fs — sell orders still open for %s",
+        timeout, symbol,
+    )
+    return False
 
 def replace_oca_exit(
     symbol: str,
