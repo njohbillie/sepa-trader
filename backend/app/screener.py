@@ -65,7 +65,7 @@ def _analyze_safe(symbol: str) -> tuple[str, dict]:
         return symbol, result
     except Exception as exc:
         logger.warning("screener: %s failed: %s", symbol, exc)
-        return symbol, {"signal": "ERROR", "score": 0, "price": None}
+        return symbol, {"signal": "ERROR", "score": 0, "price": None, "error": str(exc)}
 
 
 def _generate_rationale(symbol: str, result: dict) -> str:
@@ -150,6 +150,17 @@ def run_screener(db: Session, mode: str = None) -> list[dict]:
         f"selected {len(top10)}. "
         f"Top score: {top_score}/8."
     )
+
+    # If high error rate, surface a sample error to aid debugging
+    if errors > len(universe) * 0.5:
+        sample_errors = [
+            f"{sym}: {r['error']}"
+            for sym, r in list(results_map.items())[:3]
+            if r.get("signal") == "ERROR" and r.get("error")
+        ]
+        if sample_errors:
+            summary_msg += " Sample errors: " + " | ".join(sample_errors)
+
     logger.info(summary_msg)
     _log_alert(db, "INFO", summary_msg)
 

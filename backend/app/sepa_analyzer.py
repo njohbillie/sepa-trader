@@ -11,12 +11,13 @@ def analyze(symbol: str) -> dict:
     week52_high, week52_low, near20, near50, above_pivot, vol_surge.
     """
     try:
-        hist = yf.download(symbol, period="1y", interval="1d", progress=False, auto_adjust=True)
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="1y", interval="1d", auto_adjust=True)
         if hist is None or len(hist) < 200:
             return {"signal": "INSUFFICIENT_DATA", "score": 0, "price": None}
 
-        close = hist["Close"].squeeze()
-        volume = hist["Volume"].squeeze()
+        close = hist["Close"]
+        volume = hist["Volume"]
 
         e20  = close.ewm(span=20,  adjust=False).mean()
         e50  = close.ewm(span=50,  adjust=False).mean()
