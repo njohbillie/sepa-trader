@@ -6,7 +6,7 @@ from ..database import get_db, get_setting, set_setting
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-EDITABLE_KEYS = {"trading_mode", "auto_execute", "risk_pct", "stop_loss_pct", "max_positions", "watchlist", "webhook_secret", "screener_universe"}
+EDITABLE_KEYS = {"trading_mode", "auto_execute", "risk_pct", "stop_loss_pct", "max_positions", "watchlist", "webhook_secret", "screener_universe", "tv_username", "tv_password"}
 
 
 @router.get("")
