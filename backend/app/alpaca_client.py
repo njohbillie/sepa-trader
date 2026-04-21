@@ -164,7 +164,7 @@ def cancel_symbol_exit_orders(symbol: str, mode: str = "paper") -> list[str]:
 def wait_for_orders_cancelled(
     symbol: str,
     mode: str = "paper",
-    timeout: float = 6.0,
+    timeout: float = 15.0,
     poll_interval: float = 0.4,
 ) -> bool:
     """

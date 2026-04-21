@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from ..database import get_db, get_setting
@@ -123,8 +123,8 @@ def _upsert_plan_exits(db: Session, symbol: str, stop: float, target: float, mod
 @router.patch("/{symbol}/exits")
 def set_exit_levels(
     symbol: str,
-    stop: float,
-    target: float,
+    stop: float = Query(..., gt=0),
+    target: float = Query(..., gt=0),
     db: Session = Depends(get_db),
 ):
     """
@@ -140,8 +140,8 @@ def set_exit_levels(
 @router.post("/{symbol}/place-exits")
 def place_exits_now(
     symbol: str,
-    stop: float,
-    target: float,
+    stop: float = Query(..., gt=0),
+    target: float = Query(..., gt=0),
     db: Session = Depends(get_db),
 ):
     """
@@ -180,7 +180,7 @@ def place_exits_now(
 
     if cancelled:
         # Step 4 — poll until Alpaca confirms orders are gone
-        cleared = alp.wait_for_orders_cancelled(symbol, mode, timeout=6.0, poll_interval=0.4)
+        cleared = alp.wait_for_orders_cancelled(symbol, mode, timeout=15.0, poll_interval=0.5)
         if not cleared:
             raise HTTPException(
                 status_code=503,

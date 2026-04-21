@@ -18,12 +18,18 @@ from . import telegram_alerts as tg
 logger = logging.getLogger(__name__)
 
 
-def _size_position(portfolio_value: float, price: float, risk_pct: float, stop_pct: float) -> float:
-    risk_dollars = portfolio_value * (risk_pct / 100)
-    stop_dollars = price * (stop_pct / 100)
-    if stop_dollars <= 0:
+def _size_position(
+    portfolio_value: float,
+    price: float,
+    risk_pct: float,
+    stop_pct: float,
+    stop_price: float = 0.0,
+) -> float:
+    risk_dollars  = portfolio_value * (risk_pct / 100)
+    stop_distance = (price - stop_price) if stop_price > 0 and price > stop_price else price * (stop_pct / 100)
+    if stop_distance <= 0:
         return 0
-    return risk_dollars / stop_dollars
+    return risk_dollars / stop_distance
 
 
 def _effective_max_positions(db: Session, mode: str) -> int:
@@ -439,8 +445,8 @@ async def run_monitor(db: Session):
 
                 if signal == "BREAKOUT" and result.get("price"):
                     price        = result["price"]
-                    qty          = _size_position(portfolio, price, risk_pct, stop_pct)
                     stop, target = _get_weekly_plan_exits(db, sym, mode)
+                    qty          = _size_position(portfolio, price, risk_pct, stop_pct, stop_price=stop)
 
                     if qty >= 1:
                         if not _gate(db, sym, qty, price, stop, target, "BREAKOUT", mode):

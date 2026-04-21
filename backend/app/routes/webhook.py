@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..database import get_db, get_setting
-from ..trader import _log_signal, _log_trade, _size_position
+from ..trader import _log_signal, _log_trade, _size_position, _gate, _get_weekly_plan_exits
 from .. import alpaca_client as alp
 from .. import telegram_alerts as tg
 import asyncio
@@ -53,15 +53,19 @@ async def tradingview(alert: TVAlert, db: Session = Depends(get_db)):
 
         if signal == "BREAKOUT" and symbol not in positions:
             if len(positions) < max_pos:
-                qty = _size_position(portfolio, alert.price, risk_pct, stop_pct)
+                stop, target = _get_weekly_plan_exits(db, symbol, mode)
+                qty = _size_position(portfolio, alert.price, risk_pct, stop_pct, stop_price=stop)
                 if qty >= 1:
-                    try:
-                        alp.place_market_buy(symbol, qty, mode)
-                        _log_trade(db, symbol, "BUY", qty, alert.price, "TV_BREAKOUT", mode)
-                        action_taken = f"BUY {qty} shares"
-                        asyncio.create_task(tg.alert_trade("BUY", symbol, qty, alert.price, "TV_BREAKOUT", mode))
-                    except Exception as e:
-                        action_taken = f"BUY_FAILED: {e}"
+                    if not _gate(db, symbol, qty, alert.price, stop, target, "TV_BREAKOUT", mode):
+                        action_taken = "BLOCKED_BY_AI"
+                    else:
+                        try:
+                            alp.place_market_buy(symbol, qty, mode)
+                            _log_trade(db, symbol, "BUY", qty, alert.price, "TV_BREAKOUT", mode)
+                            action_taken = f"BUY {qty} shares"
+                            asyncio.create_task(tg.alert_trade("BUY", symbol, qty, alert.price, "TV_BREAKOUT", mode))
+                        except Exception as e:
+                            action_taken = f"BUY_FAILED: {e}"
 
         elif signal == "NO_SETUP" and symbol in positions:
             try:
