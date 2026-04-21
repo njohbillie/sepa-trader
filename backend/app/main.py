@@ -118,17 +118,31 @@ def _run_migrations():
 
 
 def _bootstrap_admin(db):
-    """Create the initial admin user if none exists. Assigns all existing data to them."""
+    """
+    Create the initial admin user if none exists. Assigns all existing data to them.
+    If ADMIN_PASSWORD is explicitly set in .env, always updates the password on startup —
+    useful for password resets without DB access.
+    """
+    from .auth import hash_password
+
+    admin_email    = getattr(settings, "admin_email",    "admin@sepa.local")
+    admin_password = getattr(settings, "admin_password", "")
+
     existing = db.execute(
         text("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")
     ).fetchone()
 
     if existing:
         admin_id = existing[0]
+        # If a password is explicitly set in .env, apply it (password reset mechanism)
+        if admin_password:
+            db.execute(
+                text("UPDATE users SET password_hash = :pw WHERE id = :id"),
+                {"pw": hash_password(admin_password), "id": admin_id},
+            )
+            db.commit()
+            logger.info("Admin password updated from ADMIN_PASSWORD env var.")
     else:
-        from .auth import hash_password
-        admin_email    = getattr(settings, "admin_email",    "admin@sepa.local")
-        admin_password = getattr(settings, "admin_password", "")
         if not admin_password:
             admin_password = secrets.token_urlsafe(12)
             logger.warning("=" * 60)
@@ -142,7 +156,7 @@ def _bootstrap_admin(db):
             text("""
                 INSERT INTO users (email, username, password_hash, role)
                 VALUES (:email, 'admin', :pw, 'admin')
-                ON CONFLICT (email) DO UPDATE SET role = 'admin'
+                ON CONFLICT (email) DO UPDATE SET role = 'admin', password_hash = :pw
                 RETURNING id
             """),
             {"email": admin_email, "pw": hash_password(admin_password)},
