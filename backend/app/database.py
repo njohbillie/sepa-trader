@@ -35,8 +35,25 @@ def set_setting(db, key: str, value: str):
 
 # ── Per-user settings (override global defaults for API-driven operations) ────
 
+# Keys that are strictly private to each user.
+# They are NEVER sourced from the global settings table, so a new user always
+# sees empty values regardless of what admin has configured globally.
+_PRIVATE_KEYS: frozenset[str] = frozenset({
+    "claude_api_key",
+    "tv_username",
+    "tv_password",
+    "webhook_secret",
+    "alpaca_paper_key",
+    "alpaca_paper_secret",
+    "alpaca_live_key",
+    "alpaca_live_secret",
+})
+
+
 def get_user_setting(db, key: str, default: str = "", user_id: int = None) -> str:
-    """Return user-specific setting, falling back to global if not overridden."""
+    """Return user-specific setting.
+    Private keys never fall back to global — they must be set explicitly per user.
+    """
     if user_id:
         row = db.execute(
             text("SELECT value FROM user_settings WHERE key = :k AND user_id = :uid"),
@@ -44,6 +61,9 @@ def get_user_setting(db, key: str, default: str = "", user_id: int = None) -> st
         ).fetchone()
         if row:
             return row[0]
+    # Private keys have no global fallback — return the supplied default
+    if key in _PRIVATE_KEYS:
+        return default
     return get_setting(db, key, default)
 
 
@@ -59,9 +79,13 @@ def set_user_setting(db, key: str, value: str, user_id: int):
 
 
 def get_all_user_settings(db, user_id: int) -> dict:
-    """Return merged dict: global defaults overlaid with user overrides."""
+    """Return merged dict: global defaults overlaid with user overrides.
+    Private/sensitive keys are excluded from the global layer — they must
+    be configured explicitly per user and are blank for new accounts.
+    """
     global_rows = db.execute(text("SELECT key, value FROM settings")).fetchall()
-    merged = {r[0]: r[1] for r in global_rows}
+    # Strip private keys so they never bleed from global into any user's view
+    merged = {r[0]: r[1] for r in global_rows if r[0] not in _PRIVATE_KEYS}
 
     user_rows = db.execute(
         text("SELECT key, value FROM user_settings WHERE user_id = :uid"),
