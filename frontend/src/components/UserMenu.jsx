@@ -39,8 +39,8 @@ export default function UserMenu() {
         onClick={() => setOpen(o => !o)}
         className="flex items-center gap-2 px-2 py-1.5 rounded-xl transition-all hover:bg-white/[0.04] border border-transparent hover:border-white/[0.06]"
       >
-        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-xs font-bold text-white shadow-glow-indigo">
-          {initial}
+        <div className="w-7 h-7 rounded-lg bg-white flex items-center justify-center text-xs font-bold text-white overflow-hidden">
+          <img src="/logo.png" alt="" className="w-full h-full object-contain" />
         </div>
         <span className="text-slate-300 text-sm hidden sm:block font-medium">{user.username}</span>
         {user.role === 'admin' && (

@@ -41,8 +41,8 @@ export default function RegisterPage({ onGoLogin }) {
 
       <div className="w-full max-w-sm animate-fade-in relative z-10">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 shadow-glow-indigo mb-4">
-            <span className="text-2xl">📈</span>
+          <div className="inline-block bg-white rounded-2xl px-6 py-4 shadow-lg mb-5">
+            <img src="/logo.png" alt="Bametta LLC" className="h-16 w-auto object-contain" />
           </div>
           <h1 className="text-2xl font-bold text-slate-100 tracking-tight">Create Account</h1>
           <p className="text-slate-500 text-sm mt-1">Join BAMETTA</p>

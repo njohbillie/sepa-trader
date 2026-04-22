@@ -78,12 +78,13 @@ export default function Navbar({ onModeChange }) {
 
         {/* Left — logo */}
         <div className="flex items-center gap-4 min-w-0">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0 shadow-glow-indigo">
-              <span className="text-sm">📈</span>
-            </div>
-            <div className="hidden sm:block">
-              <span className="text-base font-bold tracking-tight bg-gradient-to-r from-indigo-400 to-violet-400 bg-clip-text text-transparent">BAMETTA</span>
+          <div className="flex items-center gap-2">
+            <div className="bg-white rounded-xl px-2 py-1 flex items-center shadow-sm">
+              <img
+                src="/logo.png"
+                alt="Bametta LLC"
+                className="h-7 w-auto object-contain"
+              />
             </div>
           </div>
 
