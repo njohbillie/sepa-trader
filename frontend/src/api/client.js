@@ -120,3 +120,7 @@ export const fetchDMPosition        = () => api.get('/strategies/dual-momentum/p
 export const fetchDMHistory         = (limit = 24) => api.get(`/strategies/dual-momentum/history?limit=${limit}`).then(r => r.data)
 export const fetchDMConfig          = () => api.get('/strategies/dual-momentum/config').then(r => r.data)
 export const updateDMConfig         = (data) => api.patch('/strategies/dual-momentum/config', data).then(r => r.data)
+
+// ── Market tape check ─────────────────────────────────────────────────────────
+export const fetchTapeCheck         = () => api.get('/market/tape-check').then(r => r.data)
+export const refreshTapeCheck       = () => api.delete('/market/tape-check').then(r => r.data)

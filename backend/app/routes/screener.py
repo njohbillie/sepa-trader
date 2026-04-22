@@ -86,7 +86,18 @@ def get_weekly_dd(refresh: bool = False, current_user: dict = Depends(get_curren
 
     missing = [s for s in symbols if s not in cache_map]
     from ..dd_fetcher import fetch_dd_batch
+    from ..claude_analyst import generate_analyst_summary
     fresh = fetch_dd_batch(missing)
+
+    # Enrich with AI analyst summary (best-effort, non-blocking)
+    for item in fresh:
+        if not item.get("error"):
+            try:
+                item["analyst_summary"] = generate_analyst_summary(
+                    db, item["symbol"], item, user_id=uid
+                )
+            except Exception:
+                item["analyst_summary"] = ""
 
     for item in fresh:
         if not item.get("error"):
