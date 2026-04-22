@@ -124,6 +124,13 @@ def _run_migrations():
                 ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)
             """))
 
+        # ── Add 2FA columns to users table (idempotent) ──────────────────────
+        db.execute(text("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS totp_secret  VARCHAR(64),
+            ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT false
+        """))
+
         # ── Seed global settings (defaults) ──────────────────────────────────
         db.execute(text("""
             INSERT INTO settings (key, value) VALUES
