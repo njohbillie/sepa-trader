@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -5,7 +6,7 @@ from ..database import get_db, get_current_user, get_all_user_settings
 from ..config import settings as global_settings
 from .. import alpaca_client as alp
 from ..sepa_analyzer import analyze
-import logging
+from ..utils import sf
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,10 @@ def positions(current_user: dict = Depends(get_current_user), db: Session = Depe
 
     plan_map = {
         r[0]: {
-            "stop_price": float(r[1]) if r[1] else None,
-            "target1":    float(r[2]) if r[2] else None,
-            "target2":    float(r[3]) if r[3] else None,
-            "plan_week":  str(r[4])   if r[4] else None,
+            "stop_price": sf(r[1]),
+            "target1":    sf(r[2]),
+            "target2":    sf(r[3]),
+            "plan_week":  str(r[4]) if r[4] else None,
         }
         for r in plan_rows
     }
@@ -73,12 +74,12 @@ def positions(current_user: dict = Depends(get_current_user), db: Session = Depe
         plan        = plan_map.get(p.symbol, {})
         out.append({
             "symbol":          p.symbol,
-            "qty":             float(p.qty),
-            "entry_price":     float(p.avg_entry_price),
-            "current_price":   float(p.current_price),
-            "market_value":    float(p.market_value),
-            "unrealized_pl":   float(p.unrealized_pl),
-            "unrealized_plpc": float(p.unrealized_plpc) * 100,
+            "qty":             sf(p.qty, 0.0),
+            "entry_price":     sf(p.avg_entry_price, 0.0),
+            "current_price":   sf(p.current_price, 0.0),
+            "market_value":    sf(p.market_value, 0.0),
+            "unrealized_pl":   sf(p.unrealized_pl, 0.0),
+            "unrealized_plpc": (sf(p.unrealized_plpc, 0.0) or 0.0) * 100,
             "signal":          signal_data.get("signal"),
             "score":           signal_data.get("score"),
             "ema20":           signal_data.get("ema20"),

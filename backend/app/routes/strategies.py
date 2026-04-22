@@ -14,7 +14,6 @@ PATCH /api/strategies/dual-momentum/config        update config
 """
 import json
 import logging
-import math
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -23,20 +22,10 @@ from sqlalchemy.orm import Session
 from ..database import get_db, get_current_user, get_all_user_settings
 from ..config import settings as global_settings
 from .. import alpaca_client as alp
+from ..utils import sf as _sf
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
-
-
-def _sf(v, default=None):
-    """Safe float: converts None / nan / inf to `default`."""
-    if v is None:
-        return default
-    try:
-        f = float(v)
-        return default if (math.isnan(f) or math.isinf(f)) else f
-    except (TypeError, ValueError):
-        return default
 
 STRATEGY_DM = "dual_momentum"
 

@@ -6,6 +6,7 @@ from ..config import settings as global_settings
 from .. import alpaca_client as alp
 from alpaca.trading.requests import GetOrdersRequest
 from alpaca.trading.enums import QueryOrderStatus
+from ..utils import sf
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
 
@@ -41,7 +42,7 @@ def open_orders(current_user: dict = Depends(get_current_user), db: Session = De
             "id":           str(o.id),
             "symbol":       o.symbol,
             "side":         str(o.side),
-            "qty":          float(o.qty or 0),
+            "qty":          sf(o.qty, 0.0),
             "status":       str(o.status),
             "type":         str(o.type),
             "order_class":  str(getattr(o, 'order_class', '') or ''),
@@ -74,8 +75,8 @@ def trade_history(
         {
             "symbol":    r[0],
             "action":    r[1],
-            "qty":       float(r[2]),
-            "price":     float(r[3]),
+            "qty":       sf(r[2], 0.0),
+            "price":     sf(r[3], 0.0),
             "trigger":   r[4],
             "mode":      r[5],
             "timestamp": str(r[6]),
@@ -100,9 +101,9 @@ def alpaca_order_history(
             "id":           str(o.id),
             "symbol":       o.symbol,
             "side":         str(o.side).replace("OrderSide.", ""),
-            "qty":          float(o.qty or 0),
-            "filled_qty":   float(o.filled_qty or 0),
-            "filled_avg":   float(o.filled_avg_price or 0) if o.filled_avg_price else None,
+            "qty":          sf(o.qty, 0.0),
+            "filled_qty":   sf(o.filled_qty, 0.0),
+            "filled_avg":   sf(o.filled_avg_price) if o.filled_avg_price else None,
             "status":       str(o.status).replace("OrderStatus.", ""),
             "type":         str(o.type).replace("OrderType.", ""),
             "order_class":  str(getattr(o, 'order_class', '') or ''),

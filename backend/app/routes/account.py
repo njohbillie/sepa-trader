@@ -1,25 +1,14 @@
 import logging
-import math
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from ..database import get_db, get_current_user, get_all_user_settings
 from ..config import settings as global_settings
 from .. import alpaca_client as alp
+from ..utils import sf as _sf
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/account", tags=["account"])
-
-
-def _sf(v, default=None):
-    """Safe float: converts None / nan / inf to `default` (None by default)."""
-    if v is None:
-        return default
-    try:
-        f = float(v)
-        return default if (math.isnan(f) or math.isinf(f)) else f
-    except (TypeError, ValueError):
-        return default
 
 
 def _resolve_alpaca_client(user_settings: dict, mode: str, is_admin: bool = False):

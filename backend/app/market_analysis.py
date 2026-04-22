@@ -86,24 +86,34 @@ def _compute_signals() -> dict:
     """
     from .strategies.yf_client import fetch_history
 
+    import math as _math
+    from .utils import sf as _sf
+
+    def _safe_round(v, digits=2):
+        """Round a value, returning None if it's nan/inf/None."""
+        f = _sf(v)
+        return round(f, digits) if f is not None else None
+
     signals: dict = {}
 
     # ── 1 & 2: SPY trend + 20-day return ─────────────────────────────────────
     try:
         spy = fetch_history("SPY", period_days=260)
         if not spy.empty and len(spy) >= 20:
-            close     = spy["Close"]
-            sma200    = close.rolling(200).mean().iloc[-1]
-            spy_last  = float(close.iloc[-1])
-            spy_20d   = float(close.iloc[-20]) if len(close) >= 20 else spy_last
-            signals["spy_price"]      = round(spy_last, 2)
-            signals["spy_sma200"]     = round(float(sma200), 2)
-            signals["spy_above_200"]  = spy_last > float(sma200)
-            signals["spy_20d_return"] = round((spy_last - spy_20d) / spy_20d * 100, 2)
-            signals["spy_52w_high"]   = round(float(close.tail(252).max()), 2)
-            signals["spy_drawdown"]   = round(
-                (signals["spy_52w_high"] - spy_last) / signals["spy_52w_high"] * 100, 2
-            )
+            close    = spy["Close"]
+            sma200   = _sf(close.rolling(200).mean().iloc[-1])
+            spy_last = _sf(close.iloc[-1])
+            spy_20d  = _sf(close.iloc[-20]) if len(close) >= 20 else spy_last
+            if spy_last is not None:
+                signals["spy_price"]     = _safe_round(spy_last)
+                signals["spy_sma200"]    = _safe_round(sma200)
+                signals["spy_above_200"] = (spy_last > sma200) if sma200 is not None else None
+                if spy_20d:
+                    signals["spy_20d_return"] = _safe_round((spy_last - spy_20d) / spy_20d * 100)
+                w52_high = _sf(close.tail(252).max())
+                signals["spy_52w_high"] = _safe_round(w52_high)
+                if w52_high:
+                    signals["spy_drawdown"] = _safe_round((w52_high - spy_last) / w52_high * 100)
     except Exception as exc:
         logger.warning("market_analysis: SPY signals failed: %s", exc)
 
@@ -111,7 +121,7 @@ def _compute_signals() -> dict:
     try:
         vix = fetch_history("^VIX", period_days=5)
         if not vix.empty:
-            signals["vix"] = round(float(vix["Close"].iloc[-1]), 2)
+            signals["vix"] = _safe_round(_sf(vix["Close"].iloc[-1]))
     except Exception as exc:
         logger.warning("market_analysis: VIX failed: %s", exc)
 
@@ -122,14 +132,16 @@ def _compute_signals() -> dict:
         for etf in _SECTOR_ETFS:
             df = fetch_history(etf, period_days=60)
             if not df.empty and len(df) >= 50:
-                sma50 = float(df["Close"].rolling(50).mean().iloc[-1])
-                if float(df["Close"].iloc[-1]) > sma50:
-                    above50 += 1
-                total += 1
+                sma50 = _sf(df["Close"].rolling(50).mean().iloc[-1])
+                last  = _sf(df["Close"].iloc[-1])
+                if sma50 is not None and last is not None:
+                    if last > sma50:
+                        above50 += 1
+                    total += 1
         if total > 0:
-            signals["breadth_pct"] = round(above50 / total * 100, 1)
+            signals["breadth_pct"]   = round(above50 / total * 100, 1)
             signals["breadth_above"] = above50
-            signals["breadth_total"]  = total
+            signals["breadth_total"] = total
     except Exception as exc:
         logger.warning("market_analysis: breadth failed: %s", exc)
 
@@ -137,9 +149,10 @@ def _compute_signals() -> dict:
     try:
         tlt = fetch_history("TLT", period_days=10)
         if not tlt.empty and len(tlt) >= 5:
-            tlt_5d = float(tlt["Close"].iloc[-5])
-            tlt_now = float(tlt["Close"].iloc[-1])
-            signals["tlt_5d_return"] = round((tlt_now - tlt_5d) / tlt_5d * 100, 2)
+            tlt_5d  = _sf(tlt["Close"].iloc[-5])
+            tlt_now = _sf(tlt["Close"].iloc[-1])
+            if tlt_5d and tlt_now:
+                signals["tlt_5d_return"] = _safe_round((tlt_now - tlt_5d) / tlt_5d * 100)
     except Exception as exc:
         logger.warning("market_analysis: TLT failed: %s", exc)
 
