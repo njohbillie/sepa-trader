@@ -504,6 +504,27 @@ def _execute_signal(db: Session, user_id: int, strategy_name: str,
                        symbol, bp, price)
         return
 
+    # Pre-trade AI gate — DM is a rotation strategy so stop/target are 0 (R:R not applicable).
+    # Gate still enforces: no API key → HOLD, buying-power check, tape context warnings.
+    try:
+        from ..claude_analyst import pre_trade_analysis, log_pre_trade
+        gate = pre_trade_analysis(
+            db=db, symbol=symbol, side="BUY", qty=qty,
+            entry_price=price, stop_price=0.0, target_price=0.0,
+            trigger="DM_AUTO_EXECUTE", portfolio_value=_sf(account.portfolio_value, 0.0),
+            cash=_sf(account.cash, 0.0), buying_power=bp, mode=mode,
+            user_id=user_id,
+        )
+        log_pre_trade(db, symbol, "DM_AUTO_EXECUTE",
+                      gate["verdict"], gate["reason"], gate["analysis"], mode)
+        if not gate["proceed"]:
+            logger.warning("DM pre-trade gate BLOCKED %s: %s", symbol, gate["reason"])
+            return
+        if gate.get("warnings"):
+            logger.warning("DM pre-trade gate WARNED %s: %s", symbol, ", ".join(gate["warnings"]))
+    except Exception as gate_exc:
+        logger.error("DM pre-trade gate error — proceeding: %s", gate_exc)
+
     req = MarketOrderRequest(
         symbol=symbol,
         qty=qty,

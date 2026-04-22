@@ -496,11 +496,20 @@ async def run_monitor(db: Session, user_id: int | None = None):
                             continue
                         try:
                             if stop > 0 and target > 0:
-                                alp.place_bracket_buy(sym, qty, stop, target, mode)
+                                try:
+                                    alp.place_bracket_buy(sym, qty, stop, target, mode)
+                                except Exception as bracket_exc:
+                                    logger.error(
+                                        "Watchlist buy %s: bracket buy FAILED: %s — falling back to "
+                                        "market buy; exit guard will place OCO on next cycle.",
+                                        sym, bracket_exc,
+                                    )
+                                    alp.place_market_buy(sym, qty, mode)
                             else:
                                 alp.place_market_buy(sym, qty, mode)
                                 logger.warning(
-                                    "Watchlist buy %s: no stop/target — plain market buy [%s]",
+                                    "Watchlist buy %s: no stop/target — plain market buy [%s]. "
+                                    "Use 'Set Stop / Target' on the position card to add exit orders.",
                                     sym, mode,
                                 )
                             _log_trade(db, sym, "BUY", qty, price, "BREAKOUT", mode)

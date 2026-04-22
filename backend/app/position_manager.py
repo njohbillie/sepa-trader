@@ -211,18 +211,34 @@ def run_monday_open(db: Session):
             continue
 
         try:
+            order_placed = False
             if stop > 0 and target > 0:
-                alp.place_bracket_buy(sym, qty, stop, target, mode)
-                logger.info(
-                    "Monday open: bracket buy %s qty=%.0f entry=~$%.2f stop=$%.2f target=$%.2f",
-                    sym, qty, entry, stop, target,
-                )
+                try:
+                    alp.place_bracket_buy(sym, qty, stop, target, mode)
+                    logger.info(
+                        "Monday open: bracket buy %s qty=%.0f entry=~$%.2f stop=$%.2f target=$%.2f",
+                        sym, qty, entry, stop, target,
+                    )
+                    order_placed = True
+                except Exception as bracket_exc:
+                    logger.error(
+                        "Monday open: bracket buy FAILED for %s: %s — falling back to market buy; "
+                        "exit guard will place OCO on next cycle.",
+                        sym, bracket_exc,
+                    )
+                    alp.place_market_buy(sym, qty, mode)
+                    order_placed = True
             else:
                 alp.place_market_buy(sym, qty, mode)
-                logger.info(
-                    "Monday open: market buy %s qty=%.0f @ ~$%.2f (no bracket — missing stop/target)",
-                    sym, qty, entry,
+                logger.warning(
+                    "Monday open: %s has no stop/target — plain market buy placed. "
+                    "Use 'Set Stop / Target' on the position card to add exit orders.",
+                    sym,
                 )
+                order_placed = True
+
+            if not order_placed:
+                continue
 
             db.execute(
                 text("""
@@ -398,8 +414,19 @@ def _refill_slot(
         _execute_specific_pick(db=db, mode=mode, symbol=analysis["symbol"], pending_picks=pending_picks)
 
     except Exception as exc:
-        logger.error("Slot refill analysis failed: %s — falling back to next pick.", exc)
-        _execute_next_pick(db, mode, current_positions)
+        logger.error(
+            "Slot refill analysis failed: %s — NOT auto-executing fallback. Manual review required.", exc
+        )
+        try:
+            from .claude_analyst import log_analysis
+            log_analysis(
+                db, "slot_refill", closed_symbol,
+                f"Slot-refill analysis failed: {exc}. "
+                "No position opened automatically — manual review required.",
+                mode,
+            )
+        except Exception:
+            pass
 
 
 def _execute_specific_pick(db: Session, mode: str, symbol: str, pending_picks: list[dict]):
@@ -437,14 +464,26 @@ def _execute_specific_pick(db: Session, mode: str, symbol: str, pending_picks: l
 
     try:
         if stop > 0 and target > 0:
-            alp.place_bracket_buy(symbol, qty, stop, target, mode)
-            logger.info(
-                "Slot refill: bracket buy %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
-                symbol, qty, stop, target, mode,
-            )
+            try:
+                alp.place_bracket_buy(symbol, qty, stop, target, mode)
+                logger.info(
+                    "Slot refill: bracket buy %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
+                    symbol, qty, stop, target, mode,
+                )
+            except Exception as bracket_exc:
+                logger.error(
+                    "Slot refill: bracket buy FAILED for %s: %s — falling back to market buy; "
+                    "exit guard will place OCO on next cycle.",
+                    symbol, bracket_exc,
+                )
+                alp.place_market_buy(symbol, qty, mode)
         else:
             alp.place_market_buy(symbol, qty, mode)
-            logger.info("Slot refill: market buy %s qty=%.0f [%s]", symbol, qty, mode)
+            logger.warning(
+                "Slot refill: %s has no stop/target — plain market buy placed. "
+                "Use 'Set Stop / Target' on the position card to add exit orders.",
+                symbol,
+            )
 
         db.execute(
             text("""
@@ -517,9 +556,22 @@ def _execute_next_pick(db: Session, mode: str, held: set):
 
     try:
         if stop > 0 and target > 0:
-            alp.place_bracket_buy(sym, qty, stop, target, mode)
+            try:
+                alp.place_bracket_buy(sym, qty, stop, target, mode)
+            except Exception as bracket_exc:
+                logger.error(
+                    "Post-close fallback: bracket buy FAILED for %s: %s — falling back to market buy; "
+                    "exit guard will place OCO on next cycle.",
+                    sym, bracket_exc,
+                )
+                alp.place_market_buy(sym, qty, mode)
         else:
             alp.place_market_buy(sym, qty, mode)
+            logger.warning(
+                "Post-close fallback: %s has no stop/target — plain market buy placed. "
+                "Use 'Set Stop / Target' on the position card to add exit orders.",
+                sym,
+            )
 
         db.execute(
             text("""
