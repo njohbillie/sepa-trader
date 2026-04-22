@@ -68,9 +68,9 @@ const SECTIONS = [
   {
     title: 'Screener — Schedule (ET)',
     fields: [
-      { key: 'screener_auto_run',      label: 'Auto-run enabled',   type: 'toggle', defaultValue: 'true' },
-      { key: 'screener_schedule_day',  label: 'Day of week',        type: 'select', options: DAYS.map((d, i) => ({ value: String(i), label: d })) },
-      { key: 'screener_schedule_time', label: 'Time (HH:MM, 24h)',  type: 'time'   },
+      { key: 'screener_auto_run',       label: 'Auto-run enabled',                type: 'toggle',    defaultValue: 'true' },
+      { key: 'screener_schedule_days',  label: 'Days to run (click to toggle)',   type: 'day_picker', span: true },
+      { key: 'screener_schedule_times', label: 'Run times (24h ET, e.g. 20:00)', type: 'time_list',  span: true },
     ],
   },
   {
@@ -258,6 +258,86 @@ function Field({ field, value, saving, onSave,
         >
           <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${on ? 'left-6' : 'left-1'}`} />
         </button>
+      </div>
+    )
+  }
+
+  if (field.type === 'day_picker') {
+    const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    const selected   = new Set(
+      (current || '').split(',').map(d => d.trim()).filter(Boolean).map(Number)
+    )
+    function toggleDay(idx) {
+      const next = new Set(selected)
+      if (next.has(idx)) next.delete(idx); else next.add(idx)
+      const val = [...next].sort((a, b) => a - b).join(',')
+      setLocal(val)
+      onSave(val)
+    }
+    return (
+      <div className="bg-surface rounded-lg p-3">
+        <label className="text-xs text-slate-400 block mb-2">{field.label}</label>
+        <div className="flex gap-1.5 flex-wrap">
+          {DAY_LABELS.map((name, idx) => (
+            <button
+              key={idx}
+              onClick={() => toggleDay(idx)}
+              disabled={saving}
+              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors disabled:opacity-50 ${
+                selected.has(idx)
+                  ? 'bg-accent text-white'
+                  : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+              }`}
+            >{name}</button>
+          ))}
+          {selected.size === 0 && (
+            <span className="text-xs text-slate-500 self-center ml-1">No days selected — won't auto-run</span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (field.type === 'time_list') {
+    const rawVal = local ?? current ?? ''
+    const times  = rawVal.split(',').map(t => t.trim()).filter(Boolean)
+
+    function saveTimes(newTimes) {
+      const val = newTimes.filter(Boolean).join(',')
+      setLocal(val)
+      onSave(val)
+    }
+
+    return (
+      <div className="bg-surface rounded-lg p-3">
+        <label className="text-xs text-slate-400 block mb-2">{field.label}</label>
+        <div className="space-y-2">
+          {times.map((t, idx) => (
+            <div key={`${t}-${idx}`} className="flex gap-2 items-center">
+              <input
+                type="time"
+                defaultValue={t}
+                onBlur={e => {
+                  if (e.target.value !== t) {
+                    const next = [...times]; next[idx] = e.target.value; saveTimes(next)
+                  }
+                }}
+                className="flex-1 bg-transparent text-slate-200 text-sm outline-none border-b border-border focus:border-accent"
+              />
+              <button
+                onClick={() => saveTimes(times.filter((_, i) => i !== idx))}
+                className="text-slate-500 hover:text-red-400 text-base leading-none flex-shrink-0"
+              >×</button>
+            </div>
+          ))}
+          {times.length === 0 && (
+            <p className="text-xs text-slate-500">No times set — screener won't auto-run.</p>
+          )}
+        </div>
+        <button
+          onClick={() => saveTimes([...times, '20:00'])}
+          className="mt-2 text-xs text-accent hover:text-indigo-300"
+        >+ Add time</button>
       </div>
     )
   }
