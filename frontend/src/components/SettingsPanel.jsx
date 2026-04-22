@@ -9,11 +9,8 @@ const SECTIONS = [
   {
     title: 'Trading',
     fields: [
-      { key: 'auto_execute',      label: 'Auto Execute',            type: 'toggle' },
-      { key: 'risk_pct',          label: 'Risk per Trade %',        type: 'number' },
-      { key: 'stop_loss_pct',     label: 'Stop Loss %',             type: 'number' },
-      { key: 'max_position_pct',  label: 'Max Position Size % (cap)', type: 'number' },
-      { key: 'max_positions',     label: 'Max Positions',           type: 'number' },
+      { key: 'trading_mode', label: 'Trading Mode', type: 'select',
+        options: [{ value: 'paper', label: 'Paper' }, { value: 'live', label: 'Live' }] },
     ],
   },
   {
@@ -32,6 +29,17 @@ const SECTIONS = [
       { key: 'screener_vol_surge_pct', label: 'Volume surge threshold % above avg (e.g. 40 = 1.4×)', type: 'number' },
       { key: 'screener_ema20_pct',     label: 'EMA20 proximity band %',                              type: 'number' },
       { key: 'screener_ema50_pct',     label: 'EMA50 proximity band %',                              type: 'number' },
+    ],
+  },
+  {
+    title: 'Monitor',
+    fields: [
+      { key: 'monitor_enabled',     label: 'Monitor enabled (auto-place exits & manage positions)', type: 'toggle' },
+      { key: 'auto_execute',        label: 'Auto-execute new entries on Monday open',               type: 'toggle' },
+      { key: 'risk_pct',            label: 'Risk per trade %',                                     type: 'number' },
+      { key: 'stop_loss_pct',       label: 'Default stop loss %',                                  type: 'number' },
+      { key: 'max_position_pct',    label: 'Max position size % (hard cap)',                       type: 'number' },
+      { key: 'max_positions',       label: 'Max simultaneous positions',                           type: 'number' },
     ],
   },
   {

@@ -17,6 +17,8 @@ _ET = pytz.timezone("America/New_York")
 async def _monitor_job():
     db = SessionLocal()
     try:
+        if get_setting(db, "monitor_enabled", "true") != "true":
+            return
         await run_monitor(db)
         from .position_manager import check_post_close
         check_post_close(db)
@@ -263,7 +265,14 @@ async def _dm_watchdog():
                             signal.get("recommended_symbol"), reason)
 
                 if auto_execute and ai_decision.get("decision") == "EXECUTE":
-                    _execute_signal_bg(user_id, STRATEGY_DM, signal["recommended_symbol"], mode)
+                    from .routes.strategies import _dm_has_dedicated_keys
+                    if _dm_has_dedicated_keys(db, user_id, mode):
+                        _execute_signal_bg(user_id, STRATEGY_DM, signal["recommended_symbol"], mode)
+                    else:
+                        logger.warning(
+                            "DM auto-execute blocked for user %d: no dedicated Alpaca keys set for mode=%s",
+                            user_id, mode,
+                        )
 
             except Exception as exc:
                 logger.error("DM eval failed for user %d: %s", user_id, exc)

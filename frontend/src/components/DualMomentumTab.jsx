@@ -562,6 +562,15 @@ export default function DualMomentumTab() {
   const envData  = evalResult?.market_env       || env
   const gemReason = evalResult?.signal?.reasoning || signal?.data?.reasoning
 
+  // Hard-block: DM requires dedicated Alpaca keys — no sharing with Minervini account
+  const hasDedicatedKeys = config && (() => {
+    const mode = config.trading_mode || 'paper'
+    return mode === 'paper'
+      ? (config.alpaca_paper_key && config.alpaca_paper_key.includes('•'))
+      : (config.alpaca_live_key  && config.alpaca_live_key.includes('•'))
+  })()
+  const keysRequired = config && !hasDedicatedKeys
+
   return (
     <div className="space-y-3 animate-fade-in">
 
@@ -586,29 +595,53 @@ export default function DualMomentumTab() {
           </h2>
           <p className="text-xs text-slate-600 mt-0.5">SPY · EFA · AGG · BIL · 12-month momentum rotation</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => runExecute()}
-            disabled={executing || !signal}
-            className="btn-ghost"
-          >
-            {executing ? (
-              <span className="flex items-center gap-1.5">
-                <span className="w-3.5 h-3.5 border border-slate-400 border-t-transparent rounded-full animate-spin" />
-                Executing…
-              </span>
-            ) : 'Execute Signal'}
-          </button>
-          <button onClick={() => runEvaluate()} disabled={evaluating} className="btn-primary">
-            {evaluating ? (
-              <span className="flex items-center gap-2">
-                <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Running…
-              </span>
-            ) : 'Run Signal'}
-          </button>
-        </div>
+        {!keysRequired && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => runExecute()}
+              disabled={executing || !signal}
+              className="btn-ghost"
+            >
+              {executing ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="w-3.5 h-3.5 border border-slate-400 border-t-transparent rounded-full animate-spin" />
+                  Executing…
+                </span>
+              ) : 'Execute Signal'}
+            </button>
+            <button onClick={() => runEvaluate()} disabled={evaluating} className="btn-primary">
+              {evaluating ? (
+                <span className="flex items-center gap-2">
+                  <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Running…
+                </span>
+              ) : 'Run Signal'}
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Hard block — dedicated keys required */}
+      {keysRequired && (
+        <div className="card p-5 border border-red-500/20 bg-red-500/5">
+          <div className="flex gap-3">
+            <span className="text-red-400 text-xl flex-shrink-0">⊘</span>
+            <div className="space-y-2">
+              <p className="text-red-300 font-semibold text-sm">Dedicated Alpaca account required</p>
+              <p className="text-slate-400 text-xs leading-relaxed">
+                Dual Momentum deploys <strong className="text-slate-300">100% of buying power</strong> into
+                a single ETF. Running it on the same account as your Minervini positions would consume all
+                remaining cash and leave no buffer for swing trades.
+              </p>
+              <p className="text-slate-400 text-xs leading-relaxed">
+                Open a separate Alpaca <strong className="text-slate-300">paper</strong> or <strong className="text-slate-300">live</strong> account,
+                then paste its API keys into <strong className="text-slate-300">Strategy Settings → Alpaca Keys</strong> below.
+                Evaluation and execution will unlock once keys are saved.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Top row: market env + AI decision */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

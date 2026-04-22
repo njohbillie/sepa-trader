@@ -91,6 +91,23 @@ def _resolve_strategy_alpaca_client(db: Session, user_id: int, strategy_name: st
     return alp.get_client_for_keys(key, secret, paper)
 
 
+def _dm_has_dedicated_keys(db: Session, user_id: int, mode: str) -> bool:
+    """
+    Returns True only when strategy_config contains non-empty dedicated Alpaca keys
+    for the given mode.  DM must never share the main Minervini account.
+    """
+    row = db.execute(
+        text("SELECT alpaca_paper_key, alpaca_paper_secret, alpaca_live_key, alpaca_live_secret "
+             "FROM strategy_config WHERE user_id = :uid AND strategy_name = :name"),
+        {"uid": user_id, "name": STRATEGY_DM},
+    ).fetchone()
+    if not row:
+        return False
+    if mode == "paper":
+        return bool(row[0] and row[1])
+    return bool(row[2] and row[3])
+
+
 def _save_signal(db: Session, user_id: int, strategy_name: str,
                  signal: dict, ai_decision: dict, mode: str):
     dm_sig = signal.get("recommended_symbol")
@@ -173,6 +190,14 @@ def evaluate_dual_momentum(
     mode         = cfg[0] if cfg else "paper"
     auto_execute = cfg[1] if cfg else False
 
+    # Dual Momentum must use a dedicated Alpaca account — never the Minervini account
+    if not _dm_has_dedicated_keys(db, uid, mode):
+        raise HTTPException(
+            400,
+            "dm_dedicated_keys_required: Set dedicated Alpaca keys for Dual Momentum "
+            "in Strategy Settings. Sharing the Minervini account is not allowed.",
+        )
+
     from ..strategies.dual_momentum import evaluate as dm_evaluate
     from ..strategies.market_env    import assess    as env_assess
     from ..strategies.ai_strategist import decide    as ai_decide
@@ -250,6 +275,15 @@ def execute_dual_momentum(
         raise HTTPException(404, "No signal found — run evaluation first")
 
     symbol, mode, sig_id = row
+
+    # Enforce dedicated keys — no sharing with Minervini account
+    if not _dm_has_dedicated_keys(db, uid, mode):
+        raise HTTPException(
+            400,
+            "dm_dedicated_keys_required: Set dedicated Alpaca keys for Dual Momentum "
+            "in Strategy Settings. Sharing the Minervini account is not allowed.",
+        )
+
     _execute_signal(db, uid, STRATEGY_DM, symbol, mode)
 
     db.execute(

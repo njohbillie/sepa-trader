@@ -1,48 +1,147 @@
 import { useQuery } from 'react-query'
-import { fetchAccount } from '../api/client'
+import { fetchAccountsOverview, updateSetting } from '../api/client'
+import { useQueryClient } from 'react-query'
 
 function fmt(n, sign = false) {
+  if (n == null) return '—'
   const prefix = sign ? (n >= 0 ? '+' : '-') : ''
   return `${prefix}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-function MetricCard({ label, value, sub, valueClass = 'text-slate-100', glow }) {
+function AccountCard({ acct, onModeChange }) {
+  const isProfit      = acct.day_pnl >= 0
+  const plColor       = isProfit ? 'text-emerald-400' : 'text-red-400'
+  const totalPlColor  = (acct.unrealized_pl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+  const cashColor     = (acct.cash ?? 0) < 0 ? 'text-red-400' : 'text-slate-100'
+  const glowClass     = isProfit
+    ? 'shadow-[0_0_16px_rgba(16,185,129,0.08)]'
+    : 'shadow-[0_0_16px_rgba(239,68,68,0.08)]'
+
   return (
-    <div className={`stat-card flex flex-col gap-1 ${glow ? `shadow-${glow}` : ''}`}>
-      <span className="label">{label}</span>
-      <span className={`text-xl font-bold num tracking-tight ${valueClass}`}>{value}</span>
-      {sub && <span className="text-xs text-slate-500 num">{sub}</span>}
+    <div className={`card p-4 flex flex-col gap-3 ${glowClass}`}>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-slate-300">{acct.name}</span>
+        <div className="flex items-center gap-2">
+          {acct.mode === 'live' && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/30 uppercase tracking-wider">
+              <span className="w-1 h-1 rounded-full bg-orange-400 animate-pulse" />
+              Live
+            </span>
+          )}
+          {onModeChange && (
+            <button
+              onClick={() => onModeChange(acct.mode === 'paper' ? 'live' : 'paper')}
+              className="text-[10px] text-slate-600 hover:text-slate-400 underline underline-offset-2 transition-colors"
+            >
+              switch
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Stats grid — 3 rows × 2 cols */}
+      <div className="grid grid-cols-2 gap-2">
+        {/* Row 1: Portfolio + Cash */}
+        <div className="stat-card">
+          <div className="label mb-1">Portfolio</div>
+          <div className="text-sm font-bold text-slate-100 num">{fmt(acct.portfolio_value)}</div>
+        </div>
+        <div className="stat-card">
+          <div className="label mb-1">Cash</div>
+          <div className={`text-sm font-bold num ${cashColor}`}>{fmt(acct.cash, acct.cash < 0)}</div>
+        </div>
+
+        {/* Row 2: Marginable BP + Non-Marginable BP */}
+        <div className="stat-card">
+          <div className="label mb-1">Marginable BP</div>
+          <div className="text-sm font-bold text-slate-100 num">{fmt(acct.buying_power)}</div>
+        </div>
+        <div className="stat-card">
+          <div className="label mb-1">Non-Marg BP</div>
+          <div className="text-sm font-bold text-slate-100 num">{fmt(acct.non_marginable_bp ?? acct.buying_power)}</div>
+        </div>
+
+        {/* Row 3: Day P&L + Total P&L */}
+        <div className={`stat-card ${isProfit ? 'border-emerald-500/15' : 'border-red-500/15'}`}>
+          <div className="label mb-1">Day P&L</div>
+          <div className={`text-sm font-bold num ${plColor}`}>{fmt(acct.day_pnl, true)}</div>
+          <div className={`text-[10px] num ${plColor} opacity-70`}>
+            {acct.day_pnl_pct >= 0 ? '+' : ''}{acct.day_pnl_pct?.toFixed(2)}%
+          </div>
+        </div>
+        <div className={`stat-card ${(acct.unrealized_pl ?? 0) >= 0 ? 'border-emerald-500/10' : 'border-red-500/10'}`}>
+          <div className="label mb-1">Total P&L</div>
+          <div className={`text-sm font-bold num ${totalPlColor}`}>{fmt(acct.unrealized_pl ?? 0, true)}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ModeSection({ title, accounts, mode, onModeChange, isPrimary }) {
+  const hasAccounts = accounts && accounts.length > 0
+  const liveStyle   = mode === 'live'
+    ? 'border-orange-500/20 shadow-[0_0_0_1px_rgba(249,115,22,0.1)]'
+    : 'border-border'
+
+  return (
+    <div className={`card p-4 border ${liveStyle}`}>
+      {/* Section header */}
+      <div className="flex items-center gap-2 mb-3">
+        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${mode === 'live' ? 'bg-orange-400 animate-pulse' : 'bg-blue-400'}`} />
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">{title}</h3>
+        {hasAccounts && (
+          <span className="ml-auto text-[10px] text-slate-600">{accounts.length} account{accounts.length > 1 ? 's' : ''}</span>
+        )}
+      </div>
+
+      {!hasAccounts ? (
+        <p className="text-xs text-slate-600 py-2">
+          No {mode} credentials configured — add Alpaca {mode} keys in Settings.
+        </p>
+      ) : (
+        <div className={`grid gap-3 ${accounts.length > 1 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
+          {accounts.map(acct => (
+            <AccountCard
+              key={acct.name}
+              acct={acct}
+              onModeChange={isPrimary && acct.name === 'Main' ? onModeChange : null}
+            />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
 export default function AccountSummary({ onModeChange, refetchInterval = 5000 }) {
+  const qc = useQueryClient()
   const { data, isLoading, isError, error, dataUpdatedAt } = useQuery(
-    'account',
-    () => fetchAccount(),
+    'accounts-overview',
+    fetchAccountsOverview,
     { refetchInterval, refetchIntervalInBackground: true, staleTime: 2000 }
   )
 
   if (isLoading) {
     return (
-      <div className="card p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="h-5 w-36 bg-white/5 rounded-lg animate-pulse" />
-          <div className="h-7 w-20 bg-white/5 rounded-lg animate-pulse" />
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="stat-card h-16 animate-pulse" />
-          ))}
-        </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {[...Array(2)].map((_, i) => (
+          <div key={i} className="card p-4 space-y-3 animate-pulse">
+            <div className="h-3 w-24 bg-white/5 rounded" />
+            <div className="grid grid-cols-2 gap-2">
+              {[...Array(4)].map((_, j) => <div key={j} className="stat-card h-14" />)}
+            </div>
+          </div>
+        ))}
       </div>
     )
   }
 
-  if (isError || !data) {
+  if (isError) {
     const missing = error?.response?.data?.detail === 'alpaca_credentials_missing'
     return (
-      <div className={`card p-5 border ${missing ? 'border-amber-500/20' : 'border-red-500/20'}`}>
+      <div className={`card p-4 border ${missing ? 'border-amber-500/20' : 'border-red-500/20'}`}>
         <div className="flex items-start gap-3">
           <span className={`text-lg mt-0.5 ${missing ? 'text-amber-400' : 'text-red-400'}`}>
             {missing ? '⚠' : '✕'}
@@ -67,72 +166,30 @@ export default function AccountSummary({ onModeChange, refetchInterval = 5000 })
     )
   }
 
-  const isPaper  = data.mode === 'paper'
-  const isProfit = data.day_pnl >= 0
-  const lastSync = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null
+  const paper       = data?.paper ?? []
+  const live        = data?.live  ?? []
+  const lastSync    = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null
 
   return (
-    <div className={`card p-4 ${!isPaper ? 'shadow-[0_0_0_1px_rgba(249,115,22,0.2),0_8px_32px_rgba(249,115,22,0.06)]' : ''}`}>
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-3">
-          <h2 className="text-sm font-semibold text-slate-300">Account Overview</h2>
-
-          {!isPaper && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/30 uppercase tracking-wider">
-              <span className="w-1 h-1 rounded-full bg-orange-400 animate-pulse" />
-              Live
-            </span>
-          )}
-
-          <div className="flex items-center gap-1.5" title={`Last synced: ${lastSync}`}>
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-[10px] text-slate-600">Live data</span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <span className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${
-            isPaper
-              ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
-              : 'bg-orange-500/10 text-orange-400 border-orange-500/20'
-          }`}>
-            {isPaper ? 'PAPER' : '⚡ LIVE'}
-          </span>
-          <button
-            onClick={() => onModeChange && onModeChange(isPaper ? 'live' : 'paper')}
-            className="text-xs text-slate-500 hover:text-slate-300 transition-colors underline underline-offset-2"
-          >
-            switch
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <MetricCard
-          label="Portfolio Value"
-          value={fmt(data.portfolio_value)}
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <ModeSection
+          title="Paper Accounts"
+          accounts={paper}
+          mode="paper"
+          onModeChange={onModeChange}
+          isPrimary
         />
-        <MetricCard
-          label="Cash"
-          value={fmt(data.cash)}
-        />
-        <MetricCard
-          label="Buying Power"
-          value={fmt(data.buying_power)}
-        />
-        <MetricCard
-          label="Day P&L"
-          value={fmt(data.day_pnl, true)}
-          sub={`${data.day_pnl_pct >= 0 ? '+' : ''}${data.day_pnl_pct.toFixed(2)}%`}
-          valueClass={isProfit ? 'text-emerald-400' : 'text-red-400'}
-          glow={isProfit ? 'glow-emerald' : 'glow-red'}
+        <ModeSection
+          title="Live Accounts"
+          accounts={live}
+          mode="live"
+          onModeChange={onModeChange}
+          isPrimary
         />
       </div>
-
       {lastSync && (
-        <p className="text-[10px] text-slate-700 mt-2 text-right">
-          Synced {lastSync}
-        </p>
+        <p className="text-[10px] text-slate-700 text-right">Synced {lastSync}</p>
       )}
     </div>
   )

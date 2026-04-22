@@ -87,7 +87,8 @@ export const resetAdminUserPassword = (id)                          => api.post(
 export const fetchAppHealth        = ()                             => api.get('/admin/health').then(r => r.data)
 
 // ── Trading ───────────────────────────────────────────────────────────────────
-export const fetchAccount      = () => api.get('/account').then(r => r.data)
+export const fetchAccount         = () => api.get('/account').then(r => r.data)
+export const fetchAccountsOverview = () => api.get('/account/overview').then(r => r.data)
 export const fetchPositions    = () => api.get('/positions').then(r => r.data)
 export const fetchOpenOrders   = () => api.get('/orders/open').then(r => r.data)
 export const fetchTradeHistory = (limit=50) => api.get(`/orders/history?limit=${limit}`).then(r => r.data)

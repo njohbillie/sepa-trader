@@ -111,7 +111,13 @@ export default function PositionCard({ pos }) {
       </div>
 
       {/* P&L row */}
-      <div className="grid grid-cols-2 gap-2.5">
+      <div className="grid grid-cols-3 gap-2">
+        <div className="stat-card">
+          <div className="label mb-1">Current Price</div>
+          <div className="text-sm font-bold text-slate-100 num">
+            {pos.current_price != null ? usd(pos.current_price) : '—'}
+          </div>
+        </div>
         <div className="stat-card">
           <div className="label mb-1">Market Value</div>
           <div className="text-sm font-bold text-slate-100 num">{usd(pos.market_value)}</div>
