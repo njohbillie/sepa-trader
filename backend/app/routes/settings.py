@@ -33,7 +33,7 @@ EDITABLE_KEYS = {
     "pb_earnings_days_min", "pb_top_n",
     "pb_price_above_ema20", "pb_ema20_above_ema50",
     "pb_ema50_above_ema100", "pb_ema100_above_ema200",
-    "pb_ppst_required", "pb_ppst_period", "pb_ppst_multiplier",
+    "pb_ppst_required", "pb_ppst_pivot_period", "pb_ppst_period", "pb_ppst_multiplier",
     "pb_tv_screener_name",
 }
 
