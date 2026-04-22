@@ -10,8 +10,8 @@ from jose import jwt, JWTError
 from .config import settings
 
 _ALGO                        = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES  = 15
-REFRESH_TOKEN_EXPIRE_DAYS    = 7
+ACCESS_TOKEN_EXPIRE_MINUTES  = 60   # 1 hour — short enough to be safe, long enough to be usable
+REFRESH_TOKEN_EXPIRE_DAYS    = 30  # 30 days sliding window
 TWO_FA_TOKEN_EXPIRE_MINUTES  = 5
 
 

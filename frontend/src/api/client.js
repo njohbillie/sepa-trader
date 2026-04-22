@@ -5,14 +5,63 @@ const api = axios.create({
   withCredentials: true,   // send httpOnly cookies automatically
 })
 
-// On 401, redirect to login (token expired / not authenticated)
+// ── Silent token refresh ──────────────────────────────────────────────────────
+// On 401: try /auth/refresh once (uses the httpOnly refresh-token cookie).
+// If refresh succeeds, replay the original request transparently.
+// Only redirect to /login if refresh also fails (truly logged out).
+
+let _refreshing      = false
+let _refreshWaiters  = []   // pending requests queued while refresh is in flight
+
+function _onRefreshDone(error) {
+  _refreshWaiters.forEach(cb => cb(error))
+  _refreshWaiters = []
+}
+
 api.interceptors.response.use(
   res => res,
-  err => {
-    if (err.response?.status === 401 && !window.location.pathname.includes('/login')) {
-      window.location.href = '/login'
+  async err => {
+    const original = err.config
+
+    // Don't intercept: non-401, the refresh call itself, or already retried
+    if (
+      err.response?.status !== 401 ||
+      original._retried ||
+      original.url?.includes('/auth/refresh') ||
+      original.url?.includes('/auth/login')
+    ) {
+      if (err.response?.status === 401 && !window.location.pathname.includes('/login')) {
+        window.location.href = '/login'
+      }
+      return Promise.reject(err)
     }
-    return Promise.reject(err)
+
+    // If a refresh is already in flight, queue this request
+    if (_refreshing) {
+      return new Promise((resolve, reject) => {
+        _refreshWaiters.push(refreshErr => {
+          if (refreshErr) reject(err)
+          else resolve(api({ ...original, _retried: true }))
+        })
+      })
+    }
+
+    original._retried = true
+    _refreshing = true
+
+    try {
+      await api.post('/auth/refresh')
+      _onRefreshDone(null)
+      _refreshing = false
+      return api({ ...original, _retried: true })
+    } catch (refreshErr) {
+      _onRefreshDone(refreshErr)
+      _refreshing = false
+      if (!window.location.pathname.includes('/login')) {
+        window.location.href = '/login'
+      }
+      return Promise.reject(err)
+    }
   }
 )
 

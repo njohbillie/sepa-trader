@@ -38,7 +38,7 @@ def _call_ai(
 
     if provider == "anthropic":
         import anthropic
-        default_model = "claude-sonnet-4-5"
+        default_model = "claude-3-5-sonnet-20241022"
         resp = anthropic.Anthropic(api_key=api_key).messages.create(
             model=model or default_model,
             max_tokens=max_tokens,
