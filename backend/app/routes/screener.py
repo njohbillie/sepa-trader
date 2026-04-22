@@ -311,11 +311,50 @@ def trigger_pullback_screener(
                 db2.commit()
 
             from ..pullback_screener import run_pullback_screener
+            from ..screener import _save_plan, _next_monday
+
             _phase("Pullback: fetching TradingView data…")
-            results = run_pullback_screener(db2, user_id=uid)
-            set_user_setting(db2, "screener_status", "done",                         uid)
-            set_user_setting(db2, "screener_phase",  f"Done — {len(results)} stocks selected", uid)
-            set_user_setting(db2, "screener_count",  str(len(results)),               uid)
+            pb_rows = run_pullback_screener(db2, mode=mode, user_id=uid)
+            _phase(f"Pullback done — {len(pb_rows)} candidates. Merging with existing plan…")
+
+            # Determine week_start from PB results or fall back to next Monday
+            week_start = pb_rows[0]["week_start"] if pb_rows else _next_monday().isoformat()
+
+            # Load existing non-pullback rows for this week so we keep Minervini entries
+            existing = db2.execute(
+                text("""
+                    SELECT week_start, symbol, rank, score, signal,
+                           entry_price, stop_price, target1, target2,
+                           position_size, risk_amount, rationale, status,
+                           mode, screener_type
+                    FROM weekly_plan
+                    WHERE week_start = :w AND mode = :m
+                      AND user_id IS NOT DISTINCT FROM :uid
+                      AND COALESCE(screener_type, 'minervini') != 'pullback'
+                """),
+                {"w": week_start, "m": mode, "uid": uid},
+            ).fetchall()
+
+            # Merge: existing Minervini rows first, then PB rows (dedup by symbol)
+            seen: dict = {}
+            for r in existing:
+                seen[r.symbol] = dict(r._mapping)
+            for r in pb_rows:
+                sym = r["symbol"]
+                if sym in seen:
+                    seen[sym]["screener_type"] = "both"   # overlap → tag as both
+                else:
+                    seen[sym] = r
+
+            merged = list(seen.values())
+            for i, row in enumerate(merged, 1):
+                row["rank"] = i
+
+            _save_plan(db2, merged, week_start, mode, uid)
+
+            set_user_setting(db2, "screener_status", "done",                                uid)
+            set_user_setting(db2, "screener_phase",  f"Done — {len(merged)} stocks selected", uid)
+            set_user_setting(db2, "screener_count",  str(len(merged)),                       uid)
             db2.commit()
         except Exception as exc:
             err_msg = f"{exc}\n{traceback.format_exc()}"
