@@ -24,6 +24,26 @@ const SECTIONS = [
     ],
   },
   {
+    title: 'Pullback Screener (PPST + EMA)',
+    fields: [
+      { key: 'pb_price_min',         label: 'Min price $ (default 10)',             type: 'number' },
+      { key: 'pb_price_max',         label: 'Max price $ (default 200)',            type: 'number' },
+      { key: 'pb_rsi_min',           label: 'RSI min (reset zone, default 40)',     type: 'number' },
+      { key: 'pb_rsi_max',           label: 'RSI max (reset zone, default 60)',     type: 'number' },
+      { key: 'pb_avg_vol_min',       label: 'Avg 10D volume min (default 1000000)', type: 'number' },
+      { key: 'pb_rel_vol_min',       label: 'Relative volume min (default 0.75)',   type: 'number' },
+      { key: 'pb_market_cap_min',    label: 'Min market cap $ (default 500000000)', type: 'number' },
+      { key: 'pb_week_change_min',   label: '1-week change min % (default -3)',     type: 'number' },
+      { key: 'pb_ema50_proximity',   label: 'Max % from EMA50 (default 8)',         type: 'number' },
+      { key: 'pb_beta_max',          label: 'Max beta (default 2.5)',               type: 'number' },
+      { key: 'pb_earnings_days_min', label: 'Min days to earnings (default 15)',    type: 'number' },
+      { key: 'pb_top_n',             label: 'Top N from pullback screener (default 5)', type: 'number' },
+      { key: 'pb_ema_alignment',     label: 'Require EMA20 > EMA50 > EMA200',      type: 'toggle' },
+      { key: 'pb_price_above_ema20', label: 'Require price > EMA20',               type: 'toggle' },
+      { key: 'pb_ppst_required',     label: 'Require PPST bullish confirmation',   type: 'toggle' },
+    ],
+  },
+  {
     title: 'Screener — Signal Filters',
     fields: [
       { key: 'screener_vol_surge_pct', label: 'Volume surge threshold % above avg (e.g. 40 = 1.4×)', type: 'number' },

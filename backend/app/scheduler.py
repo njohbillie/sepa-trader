@@ -101,6 +101,51 @@ async def _screener_watchdog():
         db2.close()
 
 
+async def _market_close_screener():
+    """
+    Fires Mon–Fri at 4:05 PM ET — runs both screeners (Minervini + Pullback)
+    for every active user (currently just the admin user).
+    """
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text as _text
+        admin_row = db.execute(
+            _text("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")
+        ).fetchone()
+        if not admin_row:
+            return
+        uid = admin_row[0]
+
+        set_setting(db, "screener_status", "running")
+        set_setting(db, "screener_error",  "")
+        db.commit()
+
+        logger.info("Market-close screener starting (both screeners)…")
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        from .screener import run_both_screeners
+        from .database import set_user_setting as _sus
+        results = run_both_screeners(db2, user_id=uid)
+        _sus(db2, "screener_status", "done",           uid)
+        _sus(db2, "screener_count",  str(len(results)), uid)
+        logger.info(
+            "Market-close screener done. %d total stocks selected.", len(results)
+        )
+    except Exception as exc:
+        logger.error("Market-close screener failed: %s", exc)
+        db3 = SessionLocal()
+        try:
+            set_setting(db3, "screener_status", "error")
+            set_setting(db3, "screener_error",  str(exc)[:500])
+        finally:
+            db3.close()
+    finally:
+        db2.close()
+
+
 def _check_circuit_breaker(vix_threshold: float, spy_drawdown_threshold: float) -> tuple[bool, str]:
     """
     Returns (triggered, reason) if VIX or SPY drawdown breach their thresholds.
@@ -305,10 +350,24 @@ def start_scheduler():
     )
 
     # Watchdog checks every minute whether it's time to run the screener
+    # (kept for manual schedule overrides via screener_schedule_day/time settings)
     scheduler.add_job(
         _screener_watchdog,
         CronTrigger(minute="*"),
         id="screener_watchdog",
+        replace_existing=True,
+    )
+
+    # Market close: run both screeners (Minervini + Pullback) at 4:05 PM ET Mon–Fri
+    scheduler.add_job(
+        _market_close_screener,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=16,
+            minute=5,
+            timezone="America/New_York",
+        ),
+        id="market_close_screener",
         replace_existing=True,
     )
 

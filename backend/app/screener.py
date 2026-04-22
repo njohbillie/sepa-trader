@@ -286,6 +286,7 @@ def run_screener(db: Session, mode: str = None, user_id: int = None) -> list[dic
             "rationale":     _generate_rationale(c["symbol"], c),
             "status":        "PENDING",
             "mode":          mode,
+            "screener_type": "minervini",
         })
 
     # Always save (even empty) so last-run info is queryable
@@ -374,14 +375,63 @@ def _save_plan(db: Session, rows: list[dict], week_start: str, mode: str, user_i
     )
     for r in rows:
         row = {**r, "user_id": user_id}
+        row.setdefault("screener_type", "minervini")
         db.execute(
             text("""
                 INSERT INTO weekly_plan
                     (week_start, symbol, rank, score, signal, entry_price, stop_price,
-                     target1, target2, position_size, risk_amount, rationale, status, mode, user_id)
+                     target1, target2, position_size, risk_amount, rationale, status,
+                     mode, user_id, screener_type)
                 VALUES (:week_start, :symbol, :rank, :score, :signal, :entry_price, :stop_price,
-                        :target1, :target2, :position_size, :risk_amount, :rationale, :status, :mode, :user_id)
+                        :target1, :target2, :position_size, :risk_amount, :rationale, :status,
+                        :mode, :user_id, :screener_type)
             """),
             row,
         )
     db.commit()
+
+
+def run_both_screeners(db: Session, mode: str = None, user_id: int = None) -> list[dict]:
+    """
+    Run Minervini + Pullback-to-MA screeners, merge and deduplicate results.
+
+    Dedup rule: if a symbol appears in both screeners, keep the first occurrence
+    (Minervini rank wins) and tag it screener_type='both'.
+    Re-ranks the combined list 1..N.
+    Saves the merged plan to weekly_plan.
+    """
+    from .pullback_screener import run_pullback_screener
+
+    if mode is None:
+        from .database import get_user_setting as _gus
+        mode = _gus(db, "trading_mode", "paper", user_id)
+
+    logger.info("Running both screeners (mode=%s, user=%s)…", mode, user_id)
+
+    min_rows = run_screener(db, mode=mode, user_id=user_id)   # saves its own plan
+    pb_rows  = run_pullback_screener(db, mode=mode, user_id=user_id)
+
+    # Merge: Minervini first, then Pullback, dedup by symbol
+    seen: dict[str, dict] = {}
+    for r in min_rows:
+        seen[r["symbol"]] = r
+    for r in pb_rows:
+        if r["symbol"] in seen:
+            seen[r["symbol"]]["screener_type"] = "both"   # overlap
+        else:
+            seen[r["symbol"]] = r
+
+    merged = list(seen.values())
+
+    # Re-rank
+    for i, row in enumerate(merged, 1):
+        row["rank"] = i
+
+    week_start = merged[0]["week_start"] if merged else _next_monday().isoformat()
+    _save_plan(db, merged, week_start, mode, user_id)
+
+    logger.info(
+        "Both screeners done: %d minervini + %d pullback = %d unique (mode=%s)",
+        len(min_rows), len(pb_rows), len(merged), mode,
+    )
+    return merged

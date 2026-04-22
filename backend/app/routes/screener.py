@@ -19,7 +19,8 @@ def get_weekly_plan(current_user: dict = Depends(get_current_user), db: Session 
         text("""
             SELECT week_start, symbol, rank, score, signal,
                    entry_price, stop_price, target1, target2,
-                   position_size, risk_amount, rationale, status, mode, created_at
+                   position_size, risk_amount, rationale, status, mode, created_at,
+                   COALESCE(screener_type, 'minervini') AS screener_type
             FROM weekly_plan
             WHERE week_start = (
                 SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode AND user_id = :uid
@@ -153,7 +154,42 @@ def trigger_screener(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Start screener in background for the active trading mode."""
+    """Start BOTH screeners (Minervini + Pullback) in background."""
+    uid  = current_user["id"]
+    mode = get_user_setting(db, "trading_mode", "paper", uid)
+    set_user_setting(db, "screener_status", "running", uid)
+    set_user_setting(db, "screener_error",  "",        uid)
+
+    def _run():
+        db2 = SessionLocal()
+        try:
+            from ..screener import run_both_screeners
+            results = run_both_screeners(db2, user_id=uid)
+            set_user_setting(db2, "screener_status", "done",           uid)
+            set_user_setting(db2, "screener_count",  str(len(results)), uid)
+        except Exception as exc:
+            err_msg = f"{exc}\n{traceback.format_exc()}"
+            log.error("Combined screener failed:\n%s", err_msg)
+            db3 = SessionLocal()
+            try:
+                set_user_setting(db3, "screener_status", "error",        uid)
+                set_user_setting(db3, "screener_error",  str(exc)[:500], uid)
+            finally:
+                db3.close()
+        finally:
+            db2.close()
+
+    background_tasks.add_task(_run)
+    return {"status": "running", "mode": mode}
+
+
+@router.post("/run-minervini")
+def trigger_minervini_screener(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Run only the Minervini (SEPA) screener in background."""
     uid  = current_user["id"]
     mode = get_user_setting(db, "trading_mode", "paper", uid)
     set_user_setting(db, "screener_status", "running", uid)
@@ -167,19 +203,60 @@ def trigger_screener(
             set_user_setting(db2, "screener_status", "done",           uid)
             set_user_setting(db2, "screener_count",  str(len(results)), uid)
         except Exception as exc:
-            err_msg = f"{exc}\n{traceback.format_exc()}"
-            log.error("Screener background task failed:\n%s", err_msg)
             db3 = SessionLocal()
             try:
-                set_user_setting(db3, "screener_status", "error",           uid)
-                set_user_setting(db3, "screener_error",  str(exc)[:500],    uid)
+                set_user_setting(db3, "screener_status", "error",        uid)
+                set_user_setting(db3, "screener_error",  str(exc)[:500], uid)
             finally:
                 db3.close()
         finally:
             db2.close()
 
     background_tasks.add_task(_run)
-    return {"status": "running", "mode": mode}
+    return {"status": "running", "screener": "minervini", "mode": mode}
+
+
+@router.post("/run-pullback")
+def trigger_pullback_screener(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Run only the Pullback-to-MA screener in background."""
+    uid  = current_user["id"]
+    mode = get_user_setting(db, "trading_mode", "paper", uid)
+    set_user_setting(db, "screener_status", "running", uid)
+    set_user_setting(db, "screener_error",  "",        uid)
+
+    def _run():
+        db2 = SessionLocal()
+        try:
+            from ..pullback_screener import run_pullback_screener
+            results = run_pullback_screener(db2, user_id=uid)
+            set_user_setting(db2, "screener_status", "done",           uid)
+            set_user_setting(db2, "screener_count",  str(len(results)), uid)
+        except Exception as exc:
+            db3 = SessionLocal()
+            try:
+                set_user_setting(db3, "screener_status", "error",        uid)
+                set_user_setting(db3, "screener_error",  str(exc)[:500], uid)
+            finally:
+                db3.close()
+        finally:
+            db2.close()
+
+    background_tasks.add_task(_run)
+    return {"status": "running", "screener": "pullback", "mode": mode}
+
+
+@router.get("/pullback-settings")
+def get_pullback_settings(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return current pullback screener settings for this user."""
+    from ..pullback_screener import get_pb_settings
+    return get_pb_settings(db, current_user["id"])
 
 
 @router.post("/sync-tradingview")

@@ -59,21 +59,34 @@ def _get_session() -> requests.Session:
     return _session
 
 
-def _parse_chart_response(body: dict) -> pd.DataFrame:
+def _parse_chart_response(body: dict, ohlcv: bool = False) -> pd.DataFrame:
     result     = body["chart"]["result"][0]
     timestamps = result["timestamp"]
     indicators = result["indicators"]
+    quote      = indicators["quote"][0]
 
     if "adjclose" in indicators and indicators["adjclose"]:
         closes = indicators["adjclose"][0]["adjclose"]
     else:
-        closes = indicators["quote"][0]["close"]
+        closes = quote["close"]
 
-    df = pd.DataFrame(
-        {"Close": closes},
-        index=pd.to_datetime(timestamps, unit="s"),
-    )
-    return df.dropna()
+    if ohlcv:
+        df = pd.DataFrame(
+            {
+                "Open":   quote.get("open",   [None] * len(timestamps)),
+                "High":   quote.get("high",   [None] * len(timestamps)),
+                "Low":    quote.get("low",    [None] * len(timestamps)),
+                "Close":  closes,
+                "Volume": quote.get("volume", [None] * len(timestamps)),
+            },
+            index=pd.to_datetime(timestamps, unit="s"),
+        )
+    else:
+        df = pd.DataFrame(
+            {"Close": closes},
+            index=pd.to_datetime(timestamps, unit="s"),
+        )
+    return df.dropna(subset=["Close"])
 
 
 def fetch_history(symbol: str, period_days: int = 365) -> pd.DataFrame:
@@ -112,6 +125,73 @@ def fetch_history(symbol: str, period_days: int = 365) -> pd.DataFrame:
 
     logger.error("yf_client: all hosts failed for %s — returning empty", symbol)
     return pd.DataFrame()
+
+
+def fetch_ohlcv(symbol: str, period_days: int = 60) -> pd.DataFrame:
+    """
+    Return a DataFrame with Open, High, Low, Close, Volume columns.
+    Returns an empty DataFrame on failure.
+    """
+    session  = _get_session()
+    end_ts   = int(datetime.now().timestamp())
+    start_ts = int((datetime.now() - timedelta(days=period_days + 10)).timestamp())
+
+    params = {
+        "period1":        start_ts,
+        "period2":        end_ts,
+        "interval":       "1d",
+        "events":         "adjsplits,dividends",
+        "includePrePost": "false",
+    }
+
+    for host in ("query1", "query2"):
+        url = f"https://{host}.finance.yahoo.com/v8/finance/chart/{symbol}"
+        try:
+            resp = session.get(url, params=params, timeout=20)
+            resp.raise_for_status()
+            body = resp.json()
+            result = body.get("chart", {}).get("result")
+            if not result:
+                continue
+            df = _parse_chart_response(body, ohlcv=True)
+            if not df.empty:
+                return df
+        except Exception as exc:
+            logger.warning("yf_client fetch_ohlcv: %s %s failed: %s", host, symbol, exc)
+
+    return pd.DataFrame()
+
+
+def get_next_earnings_date(symbol: str) -> "date | None":
+    """
+    Return the next upcoming earnings date, or None if unknown.
+    Uses Yahoo Finance quoteSummary calendarEvents module.
+    """
+    from datetime import date as _date
+    session = _get_session()
+    try:
+        url  = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+        resp = session.get(url, params={"modules": "calendarEvents"}, timeout=10)
+        resp.raise_for_status()
+        data     = resp.json()
+        result   = data.get("quoteSummary", {}).get("result") or []
+        if not result:
+            return None
+        earnings = result[0].get("calendarEvents", {}).get("earnings", {})
+        dates    = earnings.get("earningsDate", [])
+        today    = _date.today()
+        for d in dates:
+            raw = d.get("raw") if isinstance(d, dict) else d
+            if raw:
+                try:
+                    ed = _date.fromtimestamp(int(raw))
+                    if ed >= today:
+                        return ed
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug("get_next_earnings_date %s: %s", symbol, exc)
+    return None
 
 
 def get_current_price(symbol: str) -> float:

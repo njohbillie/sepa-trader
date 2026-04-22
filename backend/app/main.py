@@ -137,6 +137,12 @@ def _run_migrations():
             ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT false
         """))
 
+        # ── Add screener_type to weekly_plan (phase-2) ────────────────────────
+        db.execute(text("""
+            ALTER TABLE weekly_plan
+            ADD COLUMN IF NOT EXISTS screener_type VARCHAR(20) DEFAULT 'minervini'
+        """))
+
         # ── Seed global settings (defaults) ──────────────────────────────────
         db.execute(text("""
             INSERT INTO settings (key, value) VALUES
@@ -153,7 +159,22 @@ def _run_migrations():
                 ('ai_provider',                 'anthropic'),
                 ('ai_model',                    ''),
                 ('positions_snapshot_paper',    ''),
-                ('positions_snapshot_live',     '')
+                ('positions_snapshot_live',     ''),
+                ('pb_price_min',                '10'),
+                ('pb_price_max',                '200'),
+                ('pb_ema_alignment',            'true'),
+                ('pb_price_above_ema20',        'true'),
+                ('pb_rsi_min',                  '40'),
+                ('pb_rsi_max',                  '60'),
+                ('pb_avg_vol_min',              '1000000'),
+                ('pb_rel_vol_min',              '0.75'),
+                ('pb_market_cap_min',           '500000000'),
+                ('pb_week_change_min',          '-3'),
+                ('pb_ema50_proximity',          '8'),
+                ('pb_beta_max',                 '2.5'),
+                ('pb_earnings_days_min',        '15'),
+                ('pb_ppst_required',            'true'),
+                ('pb_top_n',                    '5')
             ON CONFLICT (key) DO NOTHING
         """))
 
