@@ -311,6 +311,7 @@ function StrategySettings({ config, onSave, saving }) {
       is_active:           config.is_active           || false,
       auto_execute:        config.auto_execute        || false,
       lookback_months:     config.settings?.lookback_months || 12,
+      eval_day:            config.settings?.eval_day  || 1,
       alpaca_paper_key:    config.alpaca_paper_key    || '',
       alpaca_paper_secret: config.alpaca_paper_secret || '',
       alpaca_live_key:     config.alpaca_live_key     || '',
@@ -319,7 +320,11 @@ function StrategySettings({ config, onSave, saving }) {
   }
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
-  const handleSave = () => form && onSave({ ...form, lookback_months: parseInt(form.lookback_months) || 12 })
+  const handleSave = () => form && onSave({
+    ...form,
+    lookback_months: parseInt(form.lookback_months) || 12,
+    eval_day:        parseInt(form.eval_day)        || 1,
+  })
 
   // Detect if dedicated keys are configured (masked value means set, empty means using shared account)
   const hasDedicatedKeys = form && (
@@ -386,16 +391,28 @@ function StrategySettings({ config, onSave, saving }) {
             </div>
           </div>
 
-          {/* Lookback */}
-          <div className="flex items-center gap-4">
-            <label className="label whitespace-nowrap">Lookback Months</label>
-            <input
-              type="number" min={1} max={24}
-              value={form.lookback_months}
-              onChange={e => set('lookback_months', e.target.value)}
-              className="w-20 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
-            />
-            <span className="text-xs text-slate-600">default: 12 (Antonacci GEM)</span>
+          {/* Lookback + Eval day */}
+          <div className="flex flex-wrap items-center gap-6">
+            <div className="flex items-center gap-3">
+              <label className="label whitespace-nowrap">Lookback Months</label>
+              <input
+                type="number" min={1} max={24}
+                value={form.lookback_months}
+                onChange={e => set('lookback_months', e.target.value)}
+                className="w-20 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
+              />
+              <span className="text-xs text-slate-600">default: 12 (Antonacci GEM)</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="label whitespace-nowrap">Monthly Eval Day</label>
+              <input
+                type="number" min={1} max={28}
+                value={form.eval_day}
+                onChange={e => set('eval_day', e.target.value)}
+                className="w-20 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
+              />
+              <span className="text-xs text-slate-600">day of month (1–28), auto-runs at 4:30 PM ET</span>
+            </div>
           </div>
 
           {/* Alpaca keys */}

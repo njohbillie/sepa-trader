@@ -99,6 +99,97 @@ async def _screener_watchdog():
         db2.close()
 
 
+async def _dm_monthly_watchdog():
+    """
+    Runs daily at 4:30 PM ET on weekdays.
+    Fires the Dual Momentum evaluation for every user with is_active=true
+    once per month — on whichever weekday falls on or after the configured
+    dm_eval_day (1–28, default 1). Stores last-run year-month per user to
+    prevent double-firing.
+    """
+    now_et = datetime.now(_ET)
+
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text as _text
+        from .database import get_user_setting, set_user_setting
+
+        # Find all users with DM active
+        rows = db.execute(_text("""
+            SELECT sc.user_id, sc.auto_execute,
+                   COALESCE(us.value, '1') AS eval_day
+            FROM strategy_config sc
+            LEFT JOIN user_settings us
+                ON us.user_id = sc.user_id AND us.key = 'dm_eval_day'
+            WHERE sc.strategy_name = 'dual_momentum'
+              AND sc.is_active = true
+        """)).fetchall()
+
+        if not rows:
+            return
+
+        for user_id, auto_execute, eval_day_str in rows:
+            try:
+                eval_day = max(1, min(28, int(eval_day_str or "1")))
+            except ValueError:
+                eval_day = 1
+
+            # Only fire on or after eval_day in the month (first weekday ≥ eval_day)
+            if now_et.day < eval_day:
+                continue
+
+            # Already ran this month?
+            run_key = now_et.strftime("%Y-%m")
+            last_run = get_user_setting(db, "dm_last_eval_month", "", user_id)
+            if last_run == run_key:
+                continue
+
+            # Mark as run before executing to prevent parallel duplicates
+            set_user_setting(db, "dm_last_eval_month", run_key, user_id)
+            db.commit()
+
+            logger.info("DM monthly eval: firing for user %d (%s)", user_id, run_key)
+
+            try:
+                from .strategies.dual_momentum import evaluate as dm_evaluate
+                from .strategies.market_env    import assess    as env_assess
+                from .strategies.ai_strategist import decide    as ai_decide
+                from .routes.strategies        import _save_signal, _execute_signal_bg, STRATEGY_DM
+
+                cfg = db.execute(_text(
+                    "SELECT trading_mode FROM strategy_config "
+                    "WHERE user_id=:uid AND strategy_name=:name"
+                ), {"uid": user_id, "name": STRATEGY_DM}).fetchone()
+                mode = cfg[0] if cfg else "paper"
+
+                signal     = dm_evaluate()
+                market_env = env_assess()
+                ai_decision = ai_decide(
+                    db=db,
+                    market_env=market_env,
+                    strategy_signals=[{
+                        "strategy_name":      STRATEGY_DM,
+                        "recommended_symbol": signal["recommended_symbol"],
+                        "action":             "BUY",
+                        "reasoning":          signal["reasoning"],
+                    }],
+                    portfolio={},
+                    user_id=user_id,
+                )
+                _save_signal(db, user_id, STRATEGY_DM, signal, ai_decision, mode)
+                logger.info("DM monthly eval: user %d → %s [%s]",
+                            user_id, ai_decision.get("decision"), signal.get("recommended_symbol"))
+
+                if auto_execute and ai_decision.get("decision") == "EXECUTE":
+                    _execute_signal_bg(user_id, STRATEGY_DM, signal["recommended_symbol"], mode)
+
+            except Exception as exc:
+                logger.error("DM monthly eval failed for user %d: %s", user_id, exc)
+
+    finally:
+        db.close()
+
+
 def start_scheduler():
     # Every 30 minutes Mon-Fri during market hours (9:00–15:30 ET)
     # Fires at :00 and :30 of each hour — covers 9:30 open through 15:30
@@ -127,6 +218,15 @@ def start_scheduler():
         _screener_watchdog,
         CronTrigger(minute="*"),
         id="screener_watchdog",
+        replace_existing=True,
+    )
+
+    # DM monthly evaluation — fires daily at 4:30 PM ET on weekdays,
+    # executes for each active user once per month on/after their eval_day setting
+    scheduler.add_job(
+        _dm_monthly_watchdog,
+        CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone="America/New_York"),
+        id="dm_monthly",
         replace_existing=True,
     )
 
