@@ -4,6 +4,7 @@ import { fetchSettings, updateSetting, fetchMe, fetchTvScreeners } from '../api/
 import TwoFactorSetup from './TwoFactorSetup'
 
 const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+const EXCHANGES = ['NYSE', 'NASDAQ', 'AMEX', 'CBOE', 'OTC']
 
 const SECTIONS = [
   {
@@ -27,6 +28,7 @@ const SECTIONS = [
     title: 'Pullback Screener (PPST + EMA)',
     fields: [
       { key: 'pb_tv_screener_name',  label: 'TradingView Screener name (leave blank to use app filters below)', type: 'tv_screener', span: true },
+      { key: 'pb_exchanges', label: 'Exchanges to scan', type: 'exchange_picker', span: true, defaultValue: 'NYSE,NASDAQ' },
       { key: 'pb_price_min',         label: 'Min price $ (default 10)',             type: 'number' },
       { key: 'pb_price_max',         label: 'Max price $ (default 200)',            type: 'number' },
       { key: 'pb_rsi_min',           label: 'RSI min (reset zone, default 40)',     type: 'number' },
@@ -276,6 +278,45 @@ function Field({ field, value, saving, onSave,
         >
           <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${on ? 'left-6' : 'left-1'}`} />
         </button>
+      </div>
+    )
+  }
+
+  if (field.type === 'exchange_picker') {
+    const selected = new Set(
+      (current || field.defaultValue || 'NYSE,NASDAQ')
+        .split(',').map(e => e.trim().toUpperCase()).filter(Boolean)
+    )
+    function toggleExchange(ex) {
+      const next = new Set(selected)
+      if (next.has(ex)) next.delete(ex); else next.add(ex)
+      const val = EXCHANGES.filter(e => next.has(e)).join(',')
+      setLocal(val)
+      onSave(val || 'NYSE,NASDAQ')
+    }
+    return (
+      <div className="bg-surface rounded-lg p-3">
+        <label className="text-xs text-slate-400 block mb-2">{field.label}</label>
+        <div className="flex gap-1.5 flex-wrap">
+          {EXCHANGES.map(ex => (
+            <button
+              key={ex}
+              onClick={() => toggleExchange(ex)}
+              disabled={saving}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors disabled:opacity-50 ${
+                selected.has(ex)
+                  ? 'bg-accent text-white'
+                  : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+              }`}
+            >{ex}</button>
+          ))}
+          {selected.size === 0 && (
+            <span className="text-xs text-amber-400 self-center ml-1">⚠ No exchanges selected — screener will return nothing</span>
+          )}
+        </div>
+        <p className="text-[10px] text-slate-500 mt-1.5">
+          NYSE + NASDAQ covers ~95% of liquid US equities. Add AMEX for small-caps, OTC for pink sheets.
+        </p>
       </div>
     )
   }

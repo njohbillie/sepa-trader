@@ -95,6 +95,12 @@ def get_pb_settings(db: Session, user_id: int) -> dict:
         "adx_min":            float(_s("pb_adx_min",            20.0)),  # min ADX (trend strength)
         "52w_high_pct_max":   float(_s("pb_52w_high_pct_max",   30.0)),  # max % below 52W high
         "perf_3m_min":        float(_s("pb_3m_perf_min",        -5.0)),  # min 3-month performance %
+        # Exchange filter — comma-separated list, e.g. "NYSE,NASDAQ"
+        "exchanges": [
+            e.strip().upper()
+            for e in _s("pb_exchanges", "NYSE,NASDAQ").split(",")
+            if e.strip()
+        ],
     }
 
 
@@ -287,6 +293,10 @@ def _build_tv_filters(cfg: dict) -> list[dict]:
     if cfg["market_cap_min"] > 0:
         f.append({"left": "market_cap_basic",
                   "operation": "greater", "right": cfg["market_cap_min"]})
+
+    # Exchange filter (server-side — only scan selected exchanges)
+    if cfg.get("exchanges"):
+        f.append({"left": "exchange", "operation": "in_range", "right": cfg["exchanges"]})
 
     # ADX: trend strength (server-side)
     if cfg["adx_min"] > 0:
