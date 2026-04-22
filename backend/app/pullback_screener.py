@@ -77,8 +77,9 @@ def get_pb_settings(db: Session, user_id: int) -> dict:
         "ema50_proximity":     float(_s("pb_ema50_proximity",   8.0)),
         "earnings_days_min":   int(  _s("pb_earnings_days_min", 15)),
         "ppst_required":       _s("pb_ppst_required",     "true") == "true",
-        "ppst_period":         int(  _s("pb_ppst_period",       14)),
-        "ppst_multiplier":     float(_s("pb_ppst_multiplier",   2.0)),
+        "ppst_pivot_period":   int(  _s("pb_ppst_pivot_period",  2)),    # TV: Pivot Point Period
+        "ppst_atr_factor":     float(_s("pb_ppst_multiplier",   3.0)),   # TV: ATR Factor
+        "ppst_atr_period":     int(  _s("pb_ppst_period",       10)),    # TV: ATR Period
         "top_n":               int(  _s("pb_top_n",             5)),
     }
 
@@ -454,7 +455,12 @@ def _score_candidates(candidates: list[dict], cfg: dict) -> list[dict]:
                 logger.debug("Pullback: %s skipped — insufficient OHLCV data", sym)
                 continue
 
-            ppst_bullish = _calc_ppst(df, period=cfg["ppst_period"], multiplier=cfg["ppst_multiplier"])
+            ppst_bullish = _calc_ppst(
+                df,
+                pivot_period=cfg["ppst_pivot_period"],
+                atr_factor=cfg["ppst_atr_factor"],
+                atr_period=cfg["ppst_atr_period"],
+            )
 
             if cfg["ppst_required"] and not ppst_bullish:
                 logger.debug("Pullback: %s skipped — PPST not bullish", sym)
@@ -496,17 +502,28 @@ def _score_candidates(candidates: list[dict], cfg: dict) -> list[dict]:
 
 # ── Pivot Point Supertrend ────────────────────────────────────────────────────
 
-def _calc_ppst(df: pd.DataFrame, period: int = 14, multiplier: float = 2.0) -> bool:
+def _calc_ppst(
+    df: pd.DataFrame,
+    pivot_period: int   = 2,    # TV "Pivot Point Period"
+    atr_factor:   float = 3.0,  # TV "ATR Factor"
+    atr_period:   int   = 10,   # TV "ATR Period"
+) -> bool:
     """
-    Compute Pivot Point Supertrend (PPST) direction for the most recent bar.
+    Compute Pivot Point Supertrend (PPST) direction for the most recent bar,
+    matching TradingView's default inputs (Pivot Point Period=2, ATR Factor=3,
+    ATR Period=10).
 
-    1. Pivot = (High + Low + Close) / 3
-    2. ATR(14) — Wilder's smoothed
-    3. Upper band = Pivot + multiplier × ATR  (only moves down)
-    4. Lower band = Pivot − multiplier × ATR  (only moves up)
-    5. Bullish when Close > lower band; bearish when Close < upper band
+    Formula (mirrors the most common TV Pine implementation):
+      1. Pivot High = highest(High, pivot_period)
+         Pivot Low  = lowest(Low,  pivot_period)
+         Pivot      = (Pivot High + Pivot Low + Close) / 3
+      2. ATR(atr_period) — Wilder's smoothed
+      3. Upper band = Pivot + atr_factor × ATR   (only moves down)
+         Lower band = Pivot − atr_factor × ATR   (only moves up)
+      4. Bullish when Close > lower band (trend = up)
+         Bearish when Close < upper band (trend = down)
 
-    Returns True = bullish (price riding above PPST support).
+    Returns True = bullish (price above PPST support band).
     """
     try:
         high  = df["High"].to_numpy(dtype=float)
@@ -514,42 +531,48 @@ def _calc_ppst(df: pd.DataFrame, period: int = 14, multiplier: float = 2.0) -> b
         close = df["Close"].to_numpy(dtype=float)
         n     = len(close)
 
-        if n < period + 2:
+        min_bars = max(atr_period, pivot_period) + 2
+        if n < min_bars:
             return False
 
-        pivot = (high + low + close) / 3.0
+        # ── Rolling pivot: highest high / lowest low over pivot_period ────────
+        pivot_high = np.array([
+            high[max(0, i - pivot_period + 1): i + 1].max() for i in range(n)
+        ])
+        pivot_low = np.array([
+            low[max(0, i - pivot_period + 1): i + 1].min() for i in range(n)
+        ])
+        pivot = (pivot_high + pivot_low + close) / 3.0
 
-        # True Range
-        prev_close = np.roll(close, 1)
+        # ── Wilder ATR ────────────────────────────────────────────────────────
+        prev_close    = np.roll(close, 1)
         prev_close[0] = close[0]
         tr = np.maximum.reduce([
             high - low,
             np.abs(high - prev_close),
             np.abs(low  - prev_close),
         ])
-
-        # Wilder ATR
         atr = np.zeros(n)
-        atr[period] = tr[1:period + 1].mean()
-        for i in range(period + 1, n):
-            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+        atr[atr_period] = tr[1: atr_period + 1].mean()
+        for i in range(atr_period + 1, n):
+            atr[i] = (atr[i - 1] * (atr_period - 1) + tr[i]) / atr_period
 
-        upper_raw = pivot + multiplier * atr
-        lower_raw = pivot - multiplier * atr
-
-        # Adaptive bands + direction
+        # ── Adaptive bands + trend direction ──────────────────────────────────
+        upper_raw = pivot + atr_factor * atr
+        lower_raw = pivot - atr_factor * atr
         upper     = upper_raw.copy()
         lower     = lower_raw.copy()
         direction = np.ones(n, dtype=bool)   # True = bullish
 
-        for i in range(period + 1, n):
-            # Lower band only moves up
+        start = max(atr_period, pivot_period) + 1
+        for i in range(start, n):
+            # Lower band only moves up (ratchet)
             lower[i] = (
                 lower_raw[i]
                 if lower_raw[i] > lower[i - 1] or close[i - 1] < lower[i - 1]
                 else lower[i - 1]
             )
-            # Upper band only moves down
+            # Upper band only moves down (ratchet)
             upper[i] = (
                 upper_raw[i]
                 if upper_raw[i] < upper[i - 1] or close[i - 1] > upper[i - 1]

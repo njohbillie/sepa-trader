@@ -43,9 +43,10 @@ const SECTIONS = [
       { key: 'pb_ema20_above_ema50',   label: 'Require EMA20 > EMA50',    type: 'toggle', defaultValue: 'true' },
       { key: 'pb_ema50_above_ema100',  label: 'Require EMA50 > EMA100',   type: 'toggle', defaultValue: 'true' },
       { key: 'pb_ema100_above_ema200', label: 'Require EMA100 > EMA200',  type: 'toggle', defaultValue: 'true' },
-      { key: 'pb_ppst_required',       label: 'Require PPST bullish confirmation',              type: 'toggle', defaultValue: 'true' },
-      { key: 'pb_ppst_period',         label: 'PPST ATR period (default 14, TV default 10)',      type: 'number' },
-      { key: 'pb_ppst_multiplier',     label: 'PPST multiplier (default 2.0, TV default 3.0)',   type: 'number' },
+      { key: 'pb_ppst_required',       label: 'Require PPST bullish confirmation', type: 'toggle', defaultValue: 'true' },
+      { key: 'pb_ppst_pivot_period',   label: 'PPST — Pivot Point Period (TV default 2)',  type: 'number' },
+      { key: 'pb_ppst_multiplier',     label: 'PPST — ATR Factor (TV default 3)',          type: 'number' },
+      { key: 'pb_ppst_period',         label: 'PPST — ATR Period (TV default 10)',         type: 'number' },
     ],
   },
   {
