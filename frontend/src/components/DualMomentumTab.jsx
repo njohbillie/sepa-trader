@@ -417,7 +417,7 @@ export default function DualMomentumTab() {
   const { data: env,       isLoading: envLoading } = useQuery('market-env',  fetchMarketEnvironment, { staleTime: 60_000 })
   const { data: signal,    isLoading: sigLoading } = useQuery('dm-signal',   fetchDMSignal,          { staleTime: 30_000 })
   const { data: positions, isLoading: posLoading } = useQuery('dm-position', fetchDMPosition,        { staleTime: 10_000, retry: false })
-  const { data: history                          } = useQuery('dm-history',  fetchDMHistory,         { staleTime: 30_000 })
+  const { data: history                          } = useQuery('dm-history',  () => fetchDMHistory(24), { staleTime: 30_000 })
   const { data: config                           } = useQuery('dm-config',   fetchDMConfig,          { staleTime: 60_000 })
 
   const [toast,      setToast]      = useState(null)

@@ -17,7 +17,7 @@ Universe: SPY, EFA, AGG, BIL
 import logging
 from datetime import datetime, timedelta
 
-import yfinance as yf
+from .yf_client import get_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +40,12 @@ def _fetch_momentum(symbol: str, months: int) -> float:
     try:
         end   = datetime.today()
         start = end - timedelta(days=int(months * 31.5))
-        hist  = yf.Ticker(symbol).history(start=start.strftime("%Y-%m-%d"),
-                                          end=end.strftime("%Y-%m-%d"),
-                                          auto_adjust=True)
-        if len(hist) < 20:          # need at least a month of data
+        hist  = get_ticker(symbol).history(
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            auto_adjust=True,
+        )
+        if len(hist) < 20:
             logger.warning("dual_momentum: insufficient history for %s", symbol)
             return 0.0
         first = float(hist["Close"].iloc[0])
@@ -56,7 +58,7 @@ def _fetch_momentum(symbol: str, months: int) -> float:
 
 def _fetch_current_price(symbol: str) -> float:
     try:
-        hist = yf.Ticker(symbol).history(period="2d", auto_adjust=True)
+        hist = get_ticker(symbol).history(period="2d", auto_adjust=True)
         return float(hist["Close"].iloc[-1]) if len(hist) > 0 else 0.0
     except Exception:
         return 0.0

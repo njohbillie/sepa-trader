@@ -12,7 +12,7 @@ and to weight its recommendations accordingly.
 import logging
 from datetime import datetime
 
-import yfinance as yf
+from .yf_client import get_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +30,9 @@ def assess() -> dict:
       assessed_at      — ISO timestamp
     """
     try:
-        spy_hist = yf.Ticker("SPY").history(period="1y", auto_adjust=True)
+        spy_hist = get_ticker("SPY").history(period="1y", auto_adjust=True)
         if len(spy_hist) < 200:
-            raise ValueError("Insufficient SPY history")
+            raise ValueError(f"Insufficient SPY history (got {len(spy_hist)} rows)")
 
         spy_price  = float(spy_hist["Close"].iloc[-1])
         spy_200sma = float(spy_hist["Close"].rolling(200).mean().iloc[-1])
@@ -42,18 +42,18 @@ def assess() -> dict:
     except Exception as exc:
         logger.warning("market_env: SPY fetch failed (%s) — returning UNKNOWN", exc)
         return {
-            "environment":   "UNKNOWN",
-            "description":   "Market data unavailable",
-            "spy_price":     None,
-            "spy_200sma":    None,
-            "spy_above_200": None,
+            "environment":    "UNKNOWN",
+            "description":    "Market data unavailable",
+            "spy_price":      None,
+            "spy_200sma":     None,
+            "spy_above_200":  None,
             "spy_20d_return": None,
-            "vix":           None,
-            "assessed_at":   datetime.utcnow().isoformat(),
+            "vix":            None,
+            "assessed_at":    datetime.utcnow().isoformat(),
         }
 
     try:
-        vix_hist = yf.Ticker("^VIX").history(period="5d", auto_adjust=True)
+        vix_hist = get_ticker("^VIX").history(period="5d", auto_adjust=True)
         vix = float(vix_hist["Close"].iloc[-1]) if len(vix_hist) > 0 else 20.0
     except Exception as exc:
         logger.warning("market_env: VIX fetch failed (%s) — defaulting to 20", exc)
