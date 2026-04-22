@@ -106,6 +106,10 @@ def run_screener(db: Session, mode: str = None, user_id: int = None) -> list[dic
     ema50_pct       = float(_s("screener_ema50_pct",     "3.0") or "3.0")
 
     account_value = _get_portfolio_value(db, mode, user_id)
+    if account_value <= 0:
+        msg = "Screener aborted: could not fetch account value from Alpaca — no positions sized"
+        _log_alert(db, "ERROR", msg)
+        return []
     tier_label    = "PAPER"
 
     # --- Live account graduated overrides ---
@@ -348,7 +352,10 @@ def _get_portfolio_value(db: Session, mode: str, user_id: int = None) -> float:
         acct = alp.get_account(mode)
         return float(acct.portfolio_value)
     except Exception:
-        return 10_000.0
+        logger.warning(
+            "_get_portfolio_value: could not reach Alpaca — screener aborted to avoid mis-sized positions"
+        )
+        return 0.0
 
 
 def _save_plan(db: Session, rows: list[dict], week_start: str, mode: str, user_id: int = None):
