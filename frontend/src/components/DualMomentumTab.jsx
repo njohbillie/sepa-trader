@@ -321,6 +321,13 @@ function StrategySettings({ config, onSave, saving }) {
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
   const handleSave = () => form && onSave({ ...form, lookback_months: parseInt(form.lookback_months) || 12 })
 
+  // Detect if dedicated keys are configured (masked value means set, empty means using shared account)
+  const hasDedicatedKeys = form && (
+    (form.trading_mode === 'paper' && form.alpaca_paper_key && form.alpaca_paper_key.includes('•')) ||
+    (form.trading_mode === 'live'  && form.alpaca_live_key  && form.alpaca_live_key.includes('•'))
+  )
+  const sharedAccountWarning = form?.auto_execute && !hasDedicatedKeys
+
   return (
     <div className="card overflow-hidden">
       <button
@@ -333,6 +340,22 @@ function StrategySettings({ config, onSave, saving }) {
 
       {open && form && (
         <div className="px-4 pb-4 space-y-4 border-t border-white/5 pt-4 animate-slide-up">
+
+          {/* Shared account warning */}
+          {sharedAccountWarning && (
+            <div className="flex gap-3 bg-amber-500/8 border border-amber-500/25 rounded-xl px-4 py-3">
+              <span className="text-amber-400 text-base flex-shrink-0 mt-0.5">⚠</span>
+              <div className="space-y-1">
+                <p className="text-amber-300 text-xs font-semibold">Auto-Execute shares your screener account</p>
+                <p className="text-amber-400/70 text-xs leading-relaxed">
+                  No dedicated Alpaca keys are set for Dual Momentum. When auto-executed, it will deploy
+                  into the same account as your Minervini positions — leaving no cash buffer and undersizing
+                  the ETF allocation. Set separate Alpaca keys below to fully isolate the two strategies.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Toggles row */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {[
@@ -377,8 +400,13 @@ function StrategySettings({ config, onSave, saving }) {
 
           {/* Alpaca keys */}
           <div>
-            <p className="text-xs text-slate-600 mb-3">
-              Strategy-specific Alpaca keys — leave blank to use your account defaults.
+            <p className="text-xs text-slate-600 mb-1">
+              Dedicated Alpaca account for this strategy (strongly recommended).
+            </p>
+            <p className="text-xs text-slate-700 mb-3">
+              Dual Momentum deploys 100% of buying power into a single ETF. Running it on the same
+              account as your Minervini positions will consume all remaining cash and leave no buffer.
+              Use a separate Alpaca paper or live account to fully isolate the two strategies.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {[
