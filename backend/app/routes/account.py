@@ -1,4 +1,5 @@
 import logging
+import math
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -8,6 +9,17 @@ from .. import alpaca_client as alp
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/account", tags=["account"])
+
+
+def _sf(v, default=None):
+    """Safe float: converts None / nan / inf to `default` (None by default)."""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        return default if (math.isnan(f) or math.isinf(f)) else f
+    except (TypeError, ValueError):
+        return default
 
 
 def _resolve_alpaca_client(user_settings: dict, mode: str, is_admin: bool = False):
@@ -38,35 +50,29 @@ def _resolve_alpaca_client(user_settings: dict, mode: str, is_admin: bool = Fals
 def _fetch_account_data(client, name: str, mode: str) -> dict | None:
     """Fetch and normalise one Alpaca account. Returns None on any error."""
     try:
-        acct       = client.get_account()
-        equity     = float(acct.equity)
-        last_eq    = float(acct.last_equity)
-        day_pnl    = equity - last_eq
+        acct    = client.get_account()
+        equity  = _sf(acct.equity,      0.0)
+        last_eq = _sf(acct.last_equity, 0.0)
+        day_pnl = equity - last_eq
 
-        # Unrealized P&L across all open positions (may not exist on all account types)
-        try:
-            unrealized_pl = float(acct.unrealized_pl) if acct.unrealized_pl is not None else 0.0
-        except (AttributeError, TypeError):
-            unrealized_pl = 0.0
+        unrealized_pl = _sf(getattr(acct, "unrealized_pl", None), 0.0)
 
-        # Non-marginable buying power (cash-only portion)
-        try:
-            non_marginable_bp = float(acct.non_marginable_buying_power) \
-                if acct.non_marginable_buying_power is not None else float(acct.buying_power)
-        except (AttributeError, TypeError):
-            non_marginable_bp = float(acct.buying_power)
+        non_marginable_bp = _sf(
+            getattr(acct, "non_marginable_buying_power", None),
+            _sf(acct.buying_power, 0.0),
+        )
 
         return {
-            "name":               name,
-            "mode":               mode,
-            "portfolio_value":    float(acct.portfolio_value),
-            "cash":               float(acct.cash),          # signed — negative when margin used
-            "buying_power":       float(acct.buying_power),  # marginable BP
-            "non_marginable_bp":  non_marginable_bp,
-            "equity":             equity,
-            "day_pnl":            day_pnl,
-            "day_pnl_pct":        (day_pnl / last_eq * 100) if last_eq else 0,
-            "unrealized_pl":      unrealized_pl,
+            "name":              name,
+            "mode":              mode,
+            "portfolio_value":   _sf(acct.portfolio_value, 0.0),
+            "cash":              _sf(acct.cash, 0.0),
+            "buying_power":      _sf(acct.buying_power, 0.0),
+            "non_marginable_bp": non_marginable_bp,
+            "equity":            equity,
+            "day_pnl":           day_pnl,
+            "day_pnl_pct":       (day_pnl / last_eq * 100) if last_eq else 0.0,
+            "unrealized_pl":     unrealized_pl,
         }
     except Exception as exc:
         logger.warning("_fetch_account_data(%s, %s): %s", name, mode, exc)
@@ -149,15 +155,16 @@ def account(
     user_settings = get_all_user_settings(db, current_user["id"])
     mode = user_settings.get("trading_mode", "paper")
     client = _resolve_alpaca_client(user_settings, mode, is_admin=current_user["role"] == "admin")
-    acct = client.get_account()
-    equity     = float(acct.equity)
-    last_equity = float(acct.last_equity)
+    acct        = client.get_account()
+    equity      = _sf(acct.equity,      0.0)
+    last_equity = _sf(acct.last_equity, 0.0)
+    day_pnl     = equity - last_equity
     return {
-        "mode":           mode,
-        "portfolio_value": float(acct.portfolio_value),
-        "cash":           float(acct.cash),
-        "buying_power":   float(acct.buying_power),
-        "equity":         equity,
-        "day_pnl":        equity - last_equity,
-        "day_pnl_pct":    (equity - last_equity) / last_equity * 100 if last_equity else 0,
+        "mode":            mode,
+        "portfolio_value": _sf(acct.portfolio_value, 0.0),
+        "cash":            _sf(acct.cash, 0.0),
+        "buying_power":    _sf(acct.buying_power, 0.0),
+        "equity":          equity,
+        "day_pnl":         day_pnl,
+        "day_pnl_pct":     (day_pnl / last_equity * 100) if last_equity else 0.0,
     }

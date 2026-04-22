@@ -14,6 +14,7 @@ PATCH /api/strategies/dual-momentum/config        update config
 """
 import json
 import logging
+import math
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -25,6 +26,17 @@ from .. import alpaca_client as alp
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
+
+
+def _sf(v, default=None):
+    """Safe float: converts None / nan / inf to `default`."""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        return default if (math.isnan(f) or math.isinf(f)) else f
+    except (TypeError, ValueError):
+        return default
 
 STRATEGY_DM = "dual_momentum"
 
@@ -218,8 +230,8 @@ def evaluate_dual_momentum(
         positions = client.get_all_positions()
         portfolio = {
             p.symbol: {
-                "qty":          float(p.qty),
-                "unrealized_pl": float(p.unrealized_pl),
+                "qty":           _sf(p.qty, 0.0),
+                "unrealized_pl": _sf(p.unrealized_pl, 0.0),
             }
             for p in positions
         }
@@ -317,13 +329,13 @@ def get_dm_position(
         positions = client.get_all_positions()
         return [
             {
-                "symbol":        p.symbol,
-                "qty":           float(p.qty),
-                "entry_price":   float(p.avg_entry_price),
-                "current_price": float(p.current_price),
-                "market_value":  float(p.market_value),
-                "unrealized_pl": float(p.unrealized_pl),
-                "unrealized_plpc": float(p.unrealized_plpc) * 100,
+                "symbol":          p.symbol,
+                "qty":             _sf(p.qty, 0.0),
+                "entry_price":     _sf(p.avg_entry_price, 0.0),
+                "current_price":   _sf(p.current_price, 0.0),
+                "market_value":    _sf(p.market_value, 0.0),
+                "unrealized_pl":   _sf(p.unrealized_pl, 0.0),
+                "unrealized_plpc": (_sf(p.unrealized_plpc, 0.0) or 0.0) * 100,
             }
             for p in positions
             if p.symbol in ("SPY", "EFA", "AGG", "BIL")
@@ -481,7 +493,7 @@ def _execute_signal(db: Session, user_id: int, strategy_name: str,
 
     # Size: use all available buying power (rotation strategy — 100% allocation)
     account = client.get_account()
-    bp      = float(account.buying_power)
+    bp      = _sf(account.buying_power, 0.0)
     # Get current price for the target via direct Yahoo Finance API
     from ..strategies.yf_client import get_current_price
     price = get_current_price(symbol)
