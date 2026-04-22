@@ -557,7 +557,7 @@ export default function DualMomentumTab() {
   })
 
   const displaySignal = evalResult
-    ? { ai_verdict: evalResult.ai_decision?.decision, ai_reasoning: evalResult.ai_decision?.reasoning, recommended_symbol: evalResult.signal?.recommended_symbol, mode: config?.trading_mode || 'paper' }
+    ? { ai_verdict: evalResult.ai_decision?.decision, ai_reasoning: evalResult.ai_decision?.reasoning, recommended_symbol: evalResult.signal?.recommended_symbol, mode: globalMode }
     : signal
 
   const momentum = evalResult?.signal?.momentum || signal?.data?.momentum

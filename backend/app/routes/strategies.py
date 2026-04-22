@@ -163,17 +163,21 @@ def get_latest_signal(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return the most recent saved Dual Momentum signal for this user."""
+    """Return the most recent saved Dual Momentum signal for the user's current global mode."""
+    uid           = current_user["id"]
+    user_settings = get_all_user_settings(db, uid)
+    mode          = user_settings.get("trading_mode", "paper")
+
     row = db.execute(
         text("""
             SELECT id, recommended_symbol, action, data, reasoning,
                    ai_verdict, ai_reasoning, mode, executed, created_at
             FROM strategy_signals
-            WHERE user_id = :uid AND strategy_name = :name
+            WHERE user_id = :uid AND strategy_name = :name AND mode = :mode
             ORDER BY created_at DESC
             LIMIT 1
         """),
-        {"uid": current_user["id"], "name": STRATEGY_DM},
+        {"uid": uid, "name": STRATEGY_DM, "mode": mode},
     ).fetchone()
     if not row:
         return None
@@ -352,16 +356,21 @@ def get_dm_history(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Return signal history filtered to the user's current global mode."""
+    uid           = current_user["id"]
+    user_settings = get_all_user_settings(db, uid)
+    mode          = user_settings.get("trading_mode", "paper")
+
     rows = db.execute(
         text("""
             SELECT id, recommended_symbol, action, reasoning,
                    ai_verdict, ai_reasoning, mode, executed, created_at
             FROM strategy_signals
-            WHERE user_id = :uid AND strategy_name = :name
+            WHERE user_id = :uid AND strategy_name = :name AND mode = :mode
             ORDER BY created_at DESC
             LIMIT :l
         """),
-        {"uid": current_user["id"], "name": STRATEGY_DM, "l": limit},
+        {"uid": uid, "name": STRATEGY_DM, "l": limit, "mode": mode},
     ).fetchall()
     return [dict(r._mapping) for r in rows]
 
