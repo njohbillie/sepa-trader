@@ -391,7 +391,12 @@ def _save_plan(db: Session, rows: list[dict], week_start: str, mode: str, user_i
     db.commit()
 
 
-def run_both_screeners(db: Session, mode: str = None, user_id: int = None) -> list[dict]:
+def run_both_screeners(
+    db: Session,
+    mode: str = None,
+    user_id: int = None,
+    _phase_cb=None,
+) -> list[dict]:
     """
     Run Minervini + Pullback-to-MA screeners, merge and deduplicate results.
 
@@ -402,14 +407,25 @@ def run_both_screeners(db: Session, mode: str = None, user_id: int = None) -> li
     """
     from .pullback_screener import run_pullback_screener
 
+    def _phase(msg):
+        logger.info("Screener phase: %s", msg)
+        if _phase_cb:
+            try:
+                _phase_cb(msg)
+            except Exception:
+                pass
+
     if mode is None:
         from .database import get_user_setting as _gus
         mode = _gus(db, "trading_mode", "paper", user_id)
 
     logger.info("Running both screeners (mode=%s, user=%s)…", mode, user_id)
 
+    _phase("Minervini: scanning universe via TradingView…")
     min_rows = run_screener(db, mode=mode, user_id=user_id)   # saves its own plan
+    _phase(f"Minervini done — {len(min_rows)} candidates. Running Pullback screener…")
     pb_rows  = run_pullback_screener(db, mode=mode, user_id=user_id)
+    _phase(f"Pullback done — {len(pb_rows)} candidates. Merging results…")
 
     # Merge: Minervini first, then Pullback, dedup by symbol
     seen: dict[str, dict] = {}

@@ -54,7 +54,9 @@ export default function WeeklyPlan() {
   const [msg, setMsg]               = useState(null)
   const [msgType, setMsgType]       = useState('info')
   const [logOpen, setLogOpen]       = useState(false)
+  const [elapsed, setElapsed]       = useState(0)
   const prevStatusRef               = useRef(null)
+  const elapsedRef                  = useRef(null)
 
   const { data: plan = [], isLoading, isError } = useQuery(
     'weeklyPlan',
@@ -62,10 +64,10 @@ export default function WeeklyPlan() {
     { refetchInterval: 30000 },
   )
 
-  const { data: status } = useQuery(
+  const { data: status, refetch: refetchStatus } = useQuery(
     'screenerStatus',
     () => fetchScreenerStatus(),
-    { refetchInterval: (data) => data?.status === 'running' ? 5000 : 60000 },
+    { refetchInterval: (data) => data?.status === 'running' ? 2000 : 30000 },
   )
 
   const { data: analyses = [], refetch: refetchAnalyses } = useQuery(
@@ -91,33 +93,50 @@ export default function WeeklyPlan() {
     qc.invalidateQueries(['weeklyDD', weekStart])
   }
 
+  // Sync running state from server status (handles page refresh mid-run)
   useEffect(() => {
-    const prev = prevStatusRef.current
     const curr = status?.status
+    const prev = prevStatusRef.current
     prevStatusRef.current = curr
+
+    if (curr === 'running') {
+      setRunning(true)
+      // Start elapsed timer
+      if (!elapsedRef.current) {
+        const startTs = status?.started_at ? parseFloat(status.started_at) * 1000 : Date.now()
+        setElapsed(Math.floor((Date.now() - startTs) / 1000))
+        elapsedRef.current = setInterval(() => {
+          setElapsed(Math.floor((Date.now() - startTs) / 1000))
+        }, 1000)
+      }
+    } else {
+      // Stop timer
+      if (elapsedRef.current) {
+        clearInterval(elapsedRef.current)
+        elapsedRef.current = null
+      }
+    }
+
     if (prev === 'running' && curr === 'done') {
       setRunning(false)
       qc.invalidateQueries('weeklyPlan')
-      setMsg(status?.last_run_summary || `Screener complete — ${status?.count ?? 0} stocks selected.`)
+      setMsg(`Scan complete — ${status?.count ?? 0} stocks selected.`)
       setMsgType('info')
-    } else if (prev === 'running' && curr === 'error') {
+    } else if (curr === 'error' && prev !== 'error') {
+      // Catch both transitions: running→error AND idle→error (stale timeout)
       setRunning(false)
-      setMsg(`Screener error: ${status?.error || 'Unknown error — check docker logs.'}`)
+      setMsg(`Screener error: ${status?.error || 'Unknown — check docker logs.'}`)
       setMsgType('error')
     }
-  }, [status?.status])
-
-  useEffect(() => {
-    if (status?.status === 'running' && !running) setRunning(true)
-  }, [status?.status])
+  }, [status?.status, status?.phase])
 
   async function handleRunScreener() {
     setMsg(null)
+    setElapsed(0)
     setRunning(true)
     try {
       await runScreener()
-      setMsg('Scanning stocks via TradingView… usually completes in under 30 seconds.')
-      setMsgType('info')
+      refetchStatus()
     } catch (err) {
       setRunning(false)
       setMsg(err?.response?.data?.detail || 'Failed to start screener.')
@@ -220,13 +239,13 @@ export default function WeeklyPlan() {
               {running ? 'Scanning…' : 'Run Both'}
             </button>
             <button
-              onClick={async () => { setRunning(true); setMsg(null); try { await runMinerviniScreener(); setMsg('Minervini screener running…'); setMsgType('info') } catch(e) { setRunning(false); setMsg(e?.response?.data?.detail || 'Failed'); setMsgType('error') } }}
+              onClick={async () => { setRunning(true); setMsg(null); setElapsed(0); try { await runMinerviniScreener(); refetchStatus() } catch(e) { setRunning(false); setMsg(e?.response?.data?.detail || 'Failed'); setMsgType('error') } }}
               disabled={running}
               className="px-2 py-1.5 text-xs font-medium bg-accent/70 hover:bg-indigo-600 text-white/80 disabled:opacity-50 transition-colors border-l border-white/10"
               title="Run Minervini only"
             >MIN</button>
             <button
-              onClick={async () => { setRunning(true); setMsg(null); try { await runPullbackScreener(); setMsg('Pullback screener running…'); setMsgType('info') } catch(e) { setRunning(false); setMsg(e?.response?.data?.detail || 'Failed'); setMsgType('error') } }}
+              onClick={async () => { setRunning(true); setMsg(null); setElapsed(0); try { await runPullbackScreener(); refetchStatus() } catch(e) { setRunning(false); setMsg(e?.response?.data?.detail || 'Failed'); setMsgType('error') } }}
               disabled={running}
               className="px-2 py-1.5 text-xs font-medium bg-cyan-700/80 hover:bg-cyan-600 text-white/80 disabled:opacity-50 transition-colors border-l border-white/10"
               title="Run Pullback-to-MA only"
@@ -235,7 +254,28 @@ export default function WeeklyPlan() {
         </div>
       </div>
 
-      {msg && (
+      {/* Running progress panel */}
+      {running && (
+        <div className="card border border-indigo-500/20 bg-indigo-500/5 px-4 py-3 space-y-1.5">
+          <div className="flex items-center gap-2.5">
+            <span className="inline-block w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+            <span className="text-sm font-medium text-indigo-300">
+              {status?.phase || 'Starting…'}
+            </span>
+            <span className="ml-auto text-xs text-slate-500 num tabular-nums">
+              {elapsed > 0 ? `${elapsed}s` : ''}
+            </span>
+          </div>
+          {elapsed > 120 && (
+            <p className="text-xs text-amber-400/80 pl-6">
+              Taking longer than usual — yfinance PPST checks can be slow. Hang tight.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Error / success message */}
+      {msg && !running && (
         <div className={`border rounded-xl px-4 py-2.5 text-sm ${
           msgType === 'error'
             ? 'bg-red-500/10 border-red-500/30 text-red-300'
@@ -245,9 +285,10 @@ export default function WeeklyPlan() {
         </div>
       )}
 
-      {!msg && !running && status?.last_run_summary && (
-        <div className="bg-slate-800/50 border border-border rounded-xl px-4 py-2 text-xs text-slate-400">
-          {status.last_run_summary}
+      {/* Persistent error from status (e.g. timed out) */}
+      {!running && status?.status === 'error' && status?.error && !msg && (
+        <div className="border rounded-xl px-4 py-2.5 text-sm bg-red-500/10 border-red-500/30 text-red-300">
+          Last run failed: {status.error}
         </div>
       )}
 

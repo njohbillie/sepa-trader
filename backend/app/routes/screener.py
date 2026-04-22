@@ -1,5 +1,7 @@
 import traceback
 import logging
+import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, BackgroundTasks
 from sqlalchemy import text
@@ -47,12 +49,33 @@ def get_weekly_plan(current_user: dict = Depends(get_current_user), db: Session 
 
 @router.get("/status")
 def get_screener_status(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    uid = current_user["id"]
+    uid    = current_user["id"]
+    status = get_user_setting(db, "screener_status",    "idle", uid)
+    started_at_str = get_user_setting(db, "screener_started_at", "", uid)
+
+    # Stale-run guard: if status stuck at "running" for > 5 minutes, auto-reset
+    elapsed_s = None
+    if status == "running" and started_at_str:
+        try:
+            started_ts = float(started_at_str)
+            elapsed_s  = int(time.time() - started_ts)
+            if elapsed_s > 300:
+                set_user_setting(db, "screener_status", "error", uid)
+                set_user_setting(db, "screener_error",
+                    f"Timed out after {elapsed_s}s — check server logs for details.", uid)
+                db.commit()
+                status = "error"
+        except (ValueError, TypeError):
+            pass
+
     return {
-        "status":           get_user_setting(db, "screener_status",   "idle", uid),
+        "status":           status,
+        "phase":            get_user_setting(db, "screener_phase",    "",     uid),
         "error":            get_user_setting(db, "screener_error",    "",     uid),
         "last_run_summary": get_user_setting(db, "screener_last_run", "",     uid),
         "count":            int(get_user_setting(db, "screener_count", "0",   uid) or "0"),
+        "started_at":       started_at_str,
+        "elapsed_s":        elapsed_s,
     }
 
 
@@ -180,23 +203,35 @@ def trigger_screener(
     """Start BOTH screeners (Minervini + Pullback) in background."""
     uid  = current_user["id"]
     mode = get_user_setting(db, "trading_mode", "paper", uid)
-    set_user_setting(db, "screener_status", "running", uid)
-    set_user_setting(db, "screener_error",  "",        uid)
+    set_user_setting(db, "screener_status",     "running",            uid)
+    set_user_setting(db, "screener_error",      "",                   uid)
+    set_user_setting(db, "screener_phase",      "Starting…",          uid)
+    set_user_setting(db, "screener_started_at", str(time.time()),     uid)
+    db.commit()
 
     def _run():
         db2 = SessionLocal()
         try:
+            def _phase(msg):
+                set_user_setting(db2, "screener_phase", msg, uid)
+                db2.commit()
+
             from ..screener import run_both_screeners
-            results = run_both_screeners(db2, user_id=uid)
-            set_user_setting(db2, "screener_status", "done",           uid)
-            set_user_setting(db2, "screener_count",  str(len(results)), uid)
+            _phase("Fetching TradingView data…")
+            results = run_both_screeners(db2, user_id=uid, _phase_cb=_phase)
+            set_user_setting(db2, "screener_status", "done",                         uid)
+            set_user_setting(db2, "screener_phase",  f"Done — {len(results)} stocks selected", uid)
+            set_user_setting(db2, "screener_count",  str(len(results)),               uid)
+            db2.commit()
         except Exception as exc:
             err_msg = f"{exc}\n{traceback.format_exc()}"
             log.error("Combined screener failed:\n%s", err_msg)
             db3 = SessionLocal()
             try:
-                set_user_setting(db3, "screener_status", "error",        uid)
-                set_user_setting(db3, "screener_error",  str(exc)[:500], uid)
+                set_user_setting(db3, "screener_status", "error",                uid)
+                set_user_setting(db3, "screener_phase",  "Failed",               uid)
+                set_user_setting(db3, "screener_error",  str(exc)[:500],         uid)
+                db3.commit()
             finally:
                 db3.close()
         finally:
@@ -215,21 +250,35 @@ def trigger_minervini_screener(
     """Run only the Minervini (SEPA) screener in background."""
     uid  = current_user["id"]
     mode = get_user_setting(db, "trading_mode", "paper", uid)
-    set_user_setting(db, "screener_status", "running", uid)
-    set_user_setting(db, "screener_error",  "",        uid)
+    set_user_setting(db, "screener_status",     "running",        uid)
+    set_user_setting(db, "screener_error",      "",               uid)
+    set_user_setting(db, "screener_phase",      "Starting…",      uid)
+    set_user_setting(db, "screener_started_at", str(time.time()), uid)
+    db.commit()
 
     def _run():
         db2 = SessionLocal()
         try:
+            def _phase(msg):
+                set_user_setting(db2, "screener_phase", msg, uid)
+                db2.commit()
+
             from ..screener import run_screener
+            _phase("Minervini: fetching TradingView data…")
             results = run_screener(db2, user_id=uid)
-            set_user_setting(db2, "screener_status", "done",           uid)
-            set_user_setting(db2, "screener_count",  str(len(results)), uid)
+            set_user_setting(db2, "screener_status", "done",                         uid)
+            set_user_setting(db2, "screener_phase",  f"Done — {len(results)} stocks selected", uid)
+            set_user_setting(db2, "screener_count",  str(len(results)),               uid)
+            db2.commit()
         except Exception as exc:
+            err_msg = f"{exc}\n{traceback.format_exc()}"
+            log.error("Minervini screener failed:\n%s", err_msg)
             db3 = SessionLocal()
             try:
                 set_user_setting(db3, "screener_status", "error",        uid)
+                set_user_setting(db3, "screener_phase",  "Failed",       uid)
                 set_user_setting(db3, "screener_error",  str(exc)[:500], uid)
+                db3.commit()
             finally:
                 db3.close()
         finally:
@@ -248,21 +297,35 @@ def trigger_pullback_screener(
     """Run only the Pullback-to-MA screener in background."""
     uid  = current_user["id"]
     mode = get_user_setting(db, "trading_mode", "paper", uid)
-    set_user_setting(db, "screener_status", "running", uid)
-    set_user_setting(db, "screener_error",  "",        uid)
+    set_user_setting(db, "screener_status",     "running",        uid)
+    set_user_setting(db, "screener_error",      "",               uid)
+    set_user_setting(db, "screener_phase",      "Starting…",      uid)
+    set_user_setting(db, "screener_started_at", str(time.time()), uid)
+    db.commit()
 
     def _run():
         db2 = SessionLocal()
         try:
+            def _phase(msg):
+                set_user_setting(db2, "screener_phase", msg, uid)
+                db2.commit()
+
             from ..pullback_screener import run_pullback_screener
+            _phase("Pullback: fetching TradingView data…")
             results = run_pullback_screener(db2, user_id=uid)
-            set_user_setting(db2, "screener_status", "done",           uid)
-            set_user_setting(db2, "screener_count",  str(len(results)), uid)
+            set_user_setting(db2, "screener_status", "done",                         uid)
+            set_user_setting(db2, "screener_phase",  f"Done — {len(results)} stocks selected", uid)
+            set_user_setting(db2, "screener_count",  str(len(results)),               uid)
+            db2.commit()
         except Exception as exc:
+            err_msg = f"{exc}\n{traceback.format_exc()}"
+            log.error("Pullback screener failed:\n%s", err_msg)
             db3 = SessionLocal()
             try:
                 set_user_setting(db3, "screener_status", "error",        uid)
+                set_user_setting(db3, "screener_phase",  "Failed",       uid)
                 set_user_setting(db3, "screener_error",  str(exc)[:500], uid)
+                db3.commit()
             finally:
                 db3.close()
         finally:
