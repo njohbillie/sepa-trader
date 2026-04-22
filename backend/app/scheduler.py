@@ -286,11 +286,8 @@ async def _dm_watchdog():
                 from .strategies.ai_strategist import decide    as ai_decide
                 from .routes.strategies        import _save_signal, _execute_signal_bg, STRATEGY_DM
 
-                cfg = db.execute(_text(
-                    "SELECT trading_mode FROM strategy_config "
-                    "WHERE user_id=:uid AND strategy_name=:name"
-                ), {"uid": user_id, "name": STRATEGY_DM}).fetchone()
-                mode = cfg[0] if cfg else "paper"
+                # Always follow the user's global trading mode
+                mode = get_user_setting(db, "trading_mode", "paper", user_id)
 
                 signal      = dm_evaluate()
                 market_env  = env_assess()

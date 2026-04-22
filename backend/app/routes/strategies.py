@@ -181,14 +181,17 @@ def evaluate_dual_momentum(
     Run the GEM algorithm + market environment + AI strategist.
     Saves the result. If auto_execute is on, fires the trade in background.
     """
-    uid      = current_user["id"]
-    cfg      = db.execute(
-        text("SELECT trading_mode, auto_execute FROM strategy_config "
+    uid          = current_user["id"]
+    is_admin     = current_user["role"] == "admin"
+    user_settings = get_all_user_settings(db, uid)
+    # Always follow the global trading mode — DM has no separate mode
+    mode         = user_settings.get("trading_mode", "paper")
+    cfg          = db.execute(
+        text("SELECT auto_execute FROM strategy_config "
              "WHERE user_id = :uid AND strategy_name = :name"),
         {"uid": uid, "name": STRATEGY_DM},
     ).fetchone()
-    mode         = cfg[0] if cfg else "paper"
-    auto_execute = cfg[1] if cfg else False
+    auto_execute = cfg[0] if cfg else False
 
     # Dual Momentum must use a dedicated Alpaca account — never the Minervini account
     if not _dm_has_dedicated_keys(db, uid, mode):
@@ -211,7 +214,6 @@ def evaluate_dual_momentum(
     # 3 — Current Alpaca position (best-effort)
     portfolio: dict = {}
     try:
-        is_admin = current_user["role"] == "admin"
         client   = _resolve_strategy_alpaca_client(db, uid, STRATEGY_DM, mode, is_admin)
         positions = client.get_all_positions()
         portfolio = {
@@ -261,10 +263,14 @@ def execute_dual_momentum(
     db: Session = Depends(get_db),
 ):
     """Manually execute the current Dual Momentum signal."""
-    uid = current_user["id"]
+    uid           = current_user["id"]
+    user_settings = get_all_user_settings(db, uid)
+    # Always follow the global trading mode — never the per-strategy mode
+    mode          = user_settings.get("trading_mode", "paper")
+
     row = db.execute(
         text("""
-            SELECT recommended_symbol, mode, id
+            SELECT recommended_symbol, id
             FROM strategy_signals
             WHERE user_id = :uid AND strategy_name = :name
             ORDER BY created_at DESC LIMIT 1
@@ -274,7 +280,7 @@ def execute_dual_momentum(
     if not row:
         raise HTTPException(404, "No signal found — run evaluation first")
 
-    symbol, mode, sig_id = row
+    symbol, sig_id = row
 
     # Enforce dedicated keys — no sharing with Minervini account
     if not _dm_has_dedicated_keys(db, uid, mode):
@@ -300,13 +306,11 @@ def get_dm_position(
     db: Session = Depends(get_db),
 ):
     """Current Alpaca position for the Dual Momentum strategy account."""
-    uid      = current_user["id"]
-    cfg      = db.execute(
-        text("SELECT trading_mode FROM strategy_config WHERE user_id=:uid AND strategy_name=:name"),
-        {"uid": uid, "name": STRATEGY_DM},
-    ).fetchone()
-    mode     = cfg[0] if cfg else "paper"
-    is_admin = current_user["role"] == "admin"
+    uid           = current_user["id"]
+    is_admin      = current_user["role"] == "admin"
+    user_settings = get_all_user_settings(db, uid)
+    # Always follow the global trading mode
+    mode          = user_settings.get("trading_mode", "paper")
 
     try:
         client    = _resolve_strategy_alpaca_client(db, uid, STRATEGY_DM, mode, is_admin)

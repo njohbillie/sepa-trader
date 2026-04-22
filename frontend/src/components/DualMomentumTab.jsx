@@ -12,6 +12,7 @@ import {
   fetchDMHistory,
   fetchDMConfig,
   updateDMConfig,
+  fetchAccount,
 } from '../api/client'
 import TapeCheck from './TapeCheck'
 
@@ -302,13 +303,12 @@ function HistoryTable({ history }) {
 }
 
 // ── Settings accordion ────────────────────────────────────────────────────────
-function StrategySettings({ config, onSave, saving }) {
+function StrategySettings({ config, onSave, saving, globalMode = 'paper' }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState(null)
 
   if (config && !form) {
     setForm({
-      trading_mode:           config.trading_mode                    || 'paper',
       is_active:              config.is_active                       || false,
       auto_execute:           config.auto_execute                    || false,
       lookback_months:        config.settings?.lookback_months       || 12,
@@ -332,10 +332,11 @@ function StrategySettings({ config, onSave, saving }) {
     spy_drawdown_threshold: parseFloat(form.spy_drawdown_threshold) || 10,
   })
 
-  // Detect if dedicated keys are configured (masked value means set, empty means using shared account)
+  // Detect if dedicated keys are configured for the GLOBAL mode
   const hasDedicatedKeys = form && (
-    (form.trading_mode === 'paper' && form.alpaca_paper_key && form.alpaca_paper_key.includes('•')) ||
-    (form.trading_mode === 'live'  && form.alpaca_live_key  && form.alpaca_live_key.includes('•'))
+    globalMode === 'paper'
+      ? (form.alpaca_paper_key && form.alpaca_paper_key.includes('•'))
+      : (form.alpaca_live_key  && form.alpaca_live_key.includes('•'))
   )
   const sharedAccountWarning = form?.auto_execute && !hasDedicatedKeys
 
@@ -384,16 +385,16 @@ function StrategySettings({ config, onSave, saving }) {
               </label>
             ))}
 
-            <div className="flex items-center gap-3">
-              <label className="label whitespace-nowrap">Trading Mode</label>
-              <select
-                value={form.trading_mode}
-                onChange={e => set('trading_mode', e.target.value)}
-                className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50"
-              >
-                <option value="paper">Paper</option>
-                <option value="live">Live</option>
-              </select>
+            <div className="flex items-center gap-2">
+              <span className="label whitespace-nowrap">Active mode</span>
+              <span className={`text-xs font-bold px-2 py-0.5 rounded-md border ${
+                globalMode === 'live'
+                  ? 'bg-orange-500/15 text-orange-400 border-orange-500/30'
+                  : 'bg-blue-500/15 text-blue-400 border-blue-500/30'
+              }`}>
+                {globalMode === 'live' ? '⚡ LIVE' : 'PAPER'}
+              </span>
+              <span className="text-[10px] text-slate-600">follows global mode switch</span>
             </div>
           </div>
 
@@ -563,10 +564,13 @@ export default function DualMomentumTab() {
   const envData  = evalResult?.market_env       || env
   const gemReason = evalResult?.signal?.reasoning || signal?.data?.reasoning
 
+  // Global trading mode drives everything — DM no longer has its own mode
+  const { data: accountMeta } = useQuery('account', fetchAccount, { staleTime: 5000 })
+  const globalMode = accountMeta?.mode ?? 'paper'
+
   // Hard-block: DM requires dedicated Alpaca keys — no sharing with Minervini account
   const hasDedicatedKeys = config && (() => {
-    const mode = config.trading_mode || 'paper'
-    return mode === 'paper'
+    return globalMode === 'paper'
       ? (config.alpaca_paper_key && config.alpaca_paper_key.includes('•'))
       : (config.alpaca_live_key  && config.alpaca_live_key.includes('•'))
   })()
@@ -675,7 +679,7 @@ export default function DualMomentumTab() {
       </div>
 
       {/* Settings */}
-      <StrategySettings config={config} onSave={saveConfig} saving={saving} />
+      <StrategySettings config={config} onSave={saveConfig} saving={saving} globalMode={globalMode} />
     </div>
   )
 }

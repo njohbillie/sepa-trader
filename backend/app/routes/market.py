@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db, get_current_user
 from ..market_analysis import get_tape_check
 
-router = APIRouter(prefix="/market", tags=["market"])
+router = APIRouter(prefix="/api/market", tags=["market"])
 
 
 @router.get("/tape-check")
