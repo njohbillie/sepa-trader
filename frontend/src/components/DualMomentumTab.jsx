@@ -338,13 +338,6 @@ function StrategySettings({ config, onSave, saving }) {
   )
   const sharedAccountWarning = form?.auto_execute && !hasDedicatedKeys
 
-  // Detect if dedicated keys are configured (masked value means set, empty means using shared account)
-  const hasDedicatedKeys = form && (
-    (form.trading_mode === 'paper' && form.alpaca_paper_key && form.alpaca_paper_key.includes('•')) ||
-    (form.trading_mode === 'live'  && form.alpaca_live_key  && form.alpaca_live_key.includes('•'))
-  )
-  const sharedAccountWarning = form?.auto_execute && !hasDedicatedKeys
-
   return (
     <div className="card overflow-hidden">
       <button
