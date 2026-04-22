@@ -38,6 +38,10 @@ const SECTIONS = [
       { key: 'pb_ema50_proximity',   label: 'Max % from EMA50 (default 8)',         type: 'number' },
       { key: 'pb_beta_max',          label: 'Max beta (default 2.5)',               type: 'number' },
       { key: 'pb_earnings_days_min',       label: 'Min days to earnings (default 15)',                          type: 'number' },
+      { key: 'pb_ema_spread_min',   label: 'Min EMA20/50 spread % — rejects flat EMA structures (default 1)', type: 'number' },
+      { key: 'pb_adx_min',          label: 'Min ADX — trend strength gate (default 20, 0 = off)',              type: 'number' },
+      { key: 'pb_52w_high_pct_max', label: 'Max % below 52-week high — Stage 2 guard (default 30)',            type: 'number' },
+      { key: 'pb_3m_perf_min',      label: 'Min 3-month performance % (default -5, e.g. -10 = lenient)',       type: 'number' },
       { key: 'pb_block_unknown_earnings', label: 'Block stocks with unknown earnings date (recommended)',        type: 'toggle', defaultValue: 'true' },
       { key: 'pb_top_n',                  label: 'Top N from pullback screener (default 5)',                    type: 'number' },
       { key: 'pb_price_above_ema20',   label: 'Require price > EMA20',    type: 'toggle', defaultValue: 'true' },
@@ -80,6 +84,7 @@ const SECTIONS = [
   {
     title: 'Integrations',
     fields: [
+      { key: 'tv_chart_layout_id', label: 'TradingView chart layout ID (paste from chart URL — optional)', type: 'text', span: true },
       { key: 'tv_username',    label: 'TradingView Username', type: 'text'     },
       { key: 'tv_password',    label: 'TradingView Password', type: 'password' },
       { key: 'watchlist',      label: 'Monitor Watchlist (CSV)',  type: 'text', span: true },

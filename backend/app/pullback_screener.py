@@ -42,6 +42,10 @@ _PB_COLS = [
     "average_volume_30d_calc",
     "market_cap_basic",
     "earnings_release_next_date",   # Unix timestamp — skip Yahoo Finance round-trip when present
+    "price_52_week_high",
+    "ADX",
+    "Perf.1M",
+    "Perf.3M",
 ]
 
 _TV_HEADERS = {
@@ -84,6 +88,10 @@ def get_pb_settings(db: Session, user_id: int) -> dict:
         # Earnings: block stocks whose next earnings date cannot be determined
         "block_unknown_earnings": _s("pb_block_unknown_earnings", "true") == "true",
         "top_n":                  int(  _s("pb_top_n",             5)),
+        "ema_spread_min":     float(_s("pb_ema_spread_min",     1.0)),   # min % EMA20 > EMA50
+        "adx_min":            float(_s("pb_adx_min",            20.0)),  # min ADX (trend strength)
+        "52w_high_pct_max":   float(_s("pb_52w_high_pct_max",   30.0)),  # max % below 52W high
+        "perf_3m_min":        float(_s("pb_3m_perf_min",        -5.0)),  # min 3-month performance %
     }
 
 
@@ -196,7 +204,9 @@ def run_pullback_screener(
         parts = [
             f"Pullback screener. RSI {c['rsi']:.0f} (reset zone).",
             f"{'PPST bullish. ' if c['ppst_bullish'] else 'PPST not confirmed. '}",
-            f"Price {c['ema50_pct']:.1f}% from EMA50.",
+            f"Price {c['ema50_pct']:.1f}% from EMA50. EMA spread {c['ema_spread']:.1f}%.",
+            f"ADX {c['adx']:.0f}. Perf 1M: {c['perf_1m']:+.1f}%, 3M: {c['perf_3m']:+.1f}%.",
+            f"{abs(c['pct_from_52wh']):.1f}% below 52W high.",
             f"EMA: {ema_ladder}.",
         ]
         if c.get("days_to_earnings") is not None:
@@ -221,6 +231,7 @@ def run_pullback_screener(
             "status":        "PENDING",
             "mode":          mode,
             "screener_type": "pullback",
+            "tv_chart_url": f"https://www.tradingview.com/chart/?symbol={c['symbol']}",
         })
 
     logger.info(
@@ -268,6 +279,12 @@ def _build_tv_filters(cfg: dict) -> list[dict]:
     if cfg["market_cap_min"] > 0:
         f.append({"left": "market_cap_basic",
                   "operation": "greater", "right": cfg["market_cap_min"]})
+
+    # ADX: trend strength (server-side)
+    if cfg["adx_min"] > 0:
+        f.append({"left": "ADX", "operation": "greater", "right": cfg["adx_min"]})
+    # 3-month performance (server-side)
+    f.append({"left": "Perf.3M", "operation": "greater", "right": cfg["perf_3m_min"]})
 
     return f
 
@@ -335,6 +352,20 @@ def _local_refinement(sym: str, v: dict, cfg: dict) -> dict | None:
     if e50 and ema50_pct > cfg["ema50_proximity"]:
         return None
 
+    # EMA spread — EMA20 must be meaningfully above EMA50 (requires arithmetic, can't be server-side)
+    if e20 and e50:
+        ema_spread_pct = (e20 - e50) / e50 * 100
+        if ema_spread_pct < cfg["ema_spread_min"]:
+            return None
+    else:
+        ema_spread_pct = 0.0
+
+    # 52-week high proximity (requires arithmetic on two TV columns)
+    w52_high = v.get("price_52_week_high") or 0
+    pct_from_52wh = ((close - w52_high) / w52_high * 100) if w52_high else -100
+    if w52_high and abs(pct_from_52wh) > cfg["52w_high_pct_max"]:
+        return None
+
     # Earnings date from TV (Unix timestamp → date, or None if unavailable)
     tv_earn_ts = v.get("earnings_release_next_date")
     tv_earn_date: date | None = None
@@ -357,6 +388,11 @@ def _local_refinement(sym: str, v: dict, cfg: dict) -> dict | None:
         "rel_vol":       round(rel_vol, 2),
         "market_cap":    v.get("market_cap_basic") or 0,
         "tv_earn_date":  tv_earn_date,   # None → pass-2 will call Yahoo Finance
+        "ema_spread":    round(ema_spread_pct, 2),
+        "adx":           v.get("ADX") or 0,
+        "perf_1m":       v.get("Perf.1M") or 0,
+        "perf_3m":       v.get("Perf.3M") or 0,
+        "pct_from_52wh": round(pct_from_52wh, 1),
     }
 
 

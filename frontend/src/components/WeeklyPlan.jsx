@@ -4,7 +4,7 @@ import {
   fetchWeeklyPlan, fetchWeeklyDD, forceRefreshDD, fetchScreenerStatus,
   runScreener, runMinerviniScreener, runPullbackScreener,
   syncTradingView, updatePlanStatus,
-  fetchAnalyses, runAnalysis,
+  fetchAnalyses, runAnalysis, fetchSettings,
 } from '../api/client'
 import TapeCheck from './TapeCheck'
 
@@ -75,6 +75,9 @@ export default function WeeklyPlan() {
     () => fetchAnalyses(),                                          // ← fixed
     { staleTime: 60000, refetchOnWindowFocus: false },
   )
+
+  const { data: settings = {} } = useQuery('settings', fetchSettings, { staleTime: 300000 })
+  const tvLayoutId = settings.tv_chart_layout_id || ''
 
   const weekStart = plan[0]?.week_start
   const {
@@ -326,6 +329,7 @@ export default function WeeklyPlan() {
               dd={ddMap[row.symbol]}
               ddLoading={ddLoading}
               onStatusChange={handleStatus}
+              tvLayoutId={tvLayoutId}
             />
           ))}
         </div>
@@ -374,9 +378,13 @@ const AI_DECISION_META = {
   SKIP:    { label: 'Skip',    cls: 'bg-red-500/20     text-red-300     border border-red-500/30'     },
 }
 
-function PlanCard({ row, dd, ddLoading, onStatusChange }) {
+function PlanCard({ row, dd, ddLoading, onStatusChange, tvLayoutId }) {
   const [expanded, setExpanded] = useState(false)
   const [ddOpen, setDdOpen]     = useState(false)
+
+  const tvUrl = tvLayoutId
+    ? `https://www.tradingview.com/chart/${tvLayoutId}/?symbol=${row.symbol}`
+    : `https://www.tradingview.com/chart/?symbol=${row.symbol}`
 
   const signalCls = SIGNAL_STYLE[row.signal] || SIGNAL_STYLE.STAGE2_WATCH
   const statusCls = STATUS_STYLE[row.status] || STATUS_STYLE.PENDING
@@ -420,6 +428,16 @@ function PlanCard({ row, dd, ddLoading, onStatusChange }) {
             <span>R:R <strong className="text-emerald-400">{rr}x</strong></span>
           </div>
         </div>
+        <a
+          href={tvUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={e => e.stopPropagation()}
+          className="flex-shrink-0 text-xs px-2 py-1 rounded-md bg-sky-500/15 text-sky-400 border border-sky-500/20 hover:bg-sky-500/25 transition-colors whitespace-nowrap"
+          title="Open chart in TradingView"
+        >
+          📊 Chart
+        </a>
         <div className="text-right flex-shrink-0 space-y-1">
           <div className="text-sm font-medium text-slate-200">{row.position_size} sh</div>
           <span className={`text-xs px-2 py-0.5 rounded-full ${statusCls}`}>{row.status}</span>
