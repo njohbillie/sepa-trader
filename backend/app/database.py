@@ -121,14 +121,14 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     row = db.execute(
-        text("SELECT id, email, username, role, is_active FROM users WHERE id = :id"),
+        text("SELECT id, email, username, role, is_active, totp_enabled FROM users WHERE id = :id"),
         {"id": user_id},
     ).fetchone()
 
     if not row or not row[4]:
         raise HTTPException(status_code=401, detail="User not found or inactive")
 
-    return {"id": row[0], "email": row[1], "username": row[2], "role": row[3]}
+    return {"id": row[0], "email": row[1], "username": row[2], "role": row[3], "totp_enabled": bool(row[5])}
 
 
 def require_admin(current_user: dict = Depends(get_current_user)) -> dict:

@@ -216,7 +216,16 @@ def change_password(
 
 @router.post("/2fa/setup")
 def setup_2fa(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Generate a TOTP secret and return the otpauth URI for QR code rendering."""
+    """Generate a TOTP secret and return the otpauth URI for QR code rendering.
+    Refuses to overwrite a secret that is already active — disable first.
+    """
+    row = db.execute(
+        text("SELECT totp_enabled FROM users WHERE id = :id"),
+        {"id": current_user["id"]},
+    ).fetchone()
+    if row and row[0]:
+        raise HTTPException(400, "2FA is already enabled — disable it before setting up again")
+
     secret = generate_totp_secret()
     db.execute(
         text("UPDATE users SET totp_secret = :s WHERE id = :id"),
