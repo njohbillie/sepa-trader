@@ -335,6 +335,7 @@ class DmConfigUpdate(BaseModel):
     alpaca_live_key:     str   | None = None
     alpaca_live_secret:  str   | None = None
     lookback_months:     int   | None = None
+    eval_day:            int   | None = None
 
 
 @router.patch("/dual-momentum/config")
@@ -368,9 +369,18 @@ def update_dm_config(
             updates.append(f"{field} = :{field}")
             params[field] = val
 
+    extra_settings = {}
     if body.lookback_months is not None:
+        extra_settings["lookback_months"] = body.lookback_months
+    if body.eval_day is not None:
+        eval_day = max(1, min(28, body.eval_day))
+        extra_settings["eval_day"] = eval_day
+        # Also persist to user_settings so the scheduler can read it
+        from ..database import set_user_setting
+        set_user_setting(db, "dm_eval_day", str(eval_day), uid)
+    if extra_settings:
         updates.append("settings = settings || CAST(:extra AS jsonb)")
-        params["extra"] = json.dumps({"lookback_months": body.lookback_months})
+        params["extra"] = json.dumps(extra_settings)
 
     if updates:
         db.execute(
