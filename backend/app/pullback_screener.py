@@ -53,20 +53,23 @@ def get_pb_settings(db: Session, user_id: int) -> dict:
         return get_user_setting(db, key, str(default), user_id)
 
     return {
-        "price_min":         float(_s("pb_price_min",         10.0)),
-        "price_max":         float(_s("pb_price_max",         200.0)),
-        "ema_alignment":     _s("pb_ema_alignment",     "true") == "true",
-        "price_above_ema20": _s("pb_price_above_ema20", "true") == "true",
-        "rsi_min":           float(_s("pb_rsi_min",           40.0)),
-        "rsi_max":           float(_s("pb_rsi_max",           60.0)),
-        "avg_vol_min":       float(_s("pb_avg_vol_min",       1_000_000)),
+        "price_min":           float(_s("pb_price_min",           10.0)),
+        "price_max":           float(_s("pb_price_max",           200.0)),
+        # EMA ladder — each step is independently togglable
+        "price_above_ema20":   _s("pb_price_above_ema20",   "true") == "true",
+        "ema20_above_ema50":   _s("pb_ema20_above_ema50",   "true") == "true",
+        "ema50_above_ema100":  _s("pb_ema50_above_ema100",  "true") == "true",
+        "ema100_above_ema200": _s("pb_ema100_above_ema200", "true") == "true",
+        "rsi_min":             float(_s("pb_rsi_min",           40.0)),
+        "rsi_max":             float(_s("pb_rsi_max",           60.0)),
+        "avg_vol_min":         float(_s("pb_avg_vol_min",       1_000_000)),
         # rel_vol_min: derived from volume / average_volume_30d_calc
-        "rel_vol_min":       float(_s("pb_rel_vol_min",       0.75)),
-        "market_cap_min":    float(_s("pb_market_cap_min",    500_000_000)),
-        "ema50_proximity":   float(_s("pb_ema50_proximity",   8.0)),
-        "earnings_days_min": int(  _s("pb_earnings_days_min", 15)),
-        "ppst_required":     _s("pb_ppst_required",     "true") == "true",
-        "top_n":             int(  _s("pb_top_n",             5)),
+        "rel_vol_min":         float(_s("pb_rel_vol_min",       0.75)),
+        "market_cap_min":      float(_s("pb_market_cap_min",    500_000_000)),
+        "ema50_proximity":     float(_s("pb_ema50_proximity",   8.0)),
+        "earnings_days_min":   int(  _s("pb_earnings_days_min", 15)),
+        "ppst_required":       _s("pb_ppst_required",     "true") == "true",
+        "top_n":               int(  _s("pb_top_n",             5)),
     }
 
 
@@ -149,11 +152,19 @@ def run_pullback_screener(
         shares   = min(risk_sh, max_sh)
         risk_amt = round(shares * stop_d, 2)
 
+        ema_ladder = " > ".join(
+            label for label, active in [
+                ("Price > EMA20",   cfg["price_above_ema20"]),
+                ("EMA20 > EMA50",   cfg["ema20_above_ema50"]),
+                ("EMA50 > EMA100",  cfg["ema50_above_ema100"]),
+                ("EMA100 > EMA200", cfg["ema100_above_ema200"]),
+            ] if active
+        ) or "No EMA ladder filters active."
         parts = [
             f"Pullback screener. RSI {c['rsi']:.0f} (reset zone).",
             f"{'PPST bullish. ' if c['ppst_bullish'] else 'PPST not confirmed. '}",
             f"Price {c['ema50_pct']:.1f}% from EMA50.",
-            "EMA alignment: 20>50>200.",
+            f"EMA: {ema_ladder}.",
         ]
         if c.get("days_to_earnings") is not None:
             parts.append(f"Earnings ≥{c['days_to_earnings']}d away.")
@@ -240,14 +251,17 @@ def _apply_tv_filters(sym: str, v: dict, cfg: dict) -> dict | None:
 
     e20  = v.get("EMA20")  or 0
     e50  = v.get("EMA50")  or 0
+    e100 = v.get("EMA100") or 0
     e200 = v.get("EMA200") or 0
 
-    # ── EMA alignment: EMA20 > EMA50 > EMA200 ────────────────────────────────
-    if cfg["ema_alignment"] and not (e20 and e50 and e200 and e20 > e50 and e50 > e200):
+    # ── EMA ladder — each step checked independently ──────────────────────────
+    if cfg["price_above_ema20"]   and e20  and close < e20:
         return None
-
-    # ── Price above EMA20 ─────────────────────────────────────────────────────
-    if cfg["price_above_ema20"] and e20 and close < e20:
+    if cfg["ema20_above_ema50"]   and e20  and e50  and e20  <= e50:
+        return None
+    if cfg["ema50_above_ema100"]  and e50  and e100 and e50  <= e100:
+        return None
+    if cfg["ema100_above_ema200"] and e100 and e200 and e100 <= e200:
         return None
 
     # ── RSI in reset zone 40–60 ───────────────────────────────────────────────
@@ -282,6 +296,7 @@ def _apply_tv_filters(sym: str, v: dict, cfg: dict) -> dict | None:
         "rsi":       rsi or 50.0,
         "ema20":     e20,
         "ema50":     e50,
+        "ema100":    e100,
         "ema200":    e200,
         "ema50_pct": ema50_pct,
         "avg_vol":   avg_vol,
