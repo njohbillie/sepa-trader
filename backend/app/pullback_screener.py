@@ -76,11 +76,13 @@ def get_pb_settings(db: Session, user_id: int) -> dict:
         "market_cap_min":      float(_s("pb_market_cap_min",    500_000_000)),
         "ema50_proximity":     float(_s("pb_ema50_proximity",   8.0)),
         "earnings_days_min":   int(  _s("pb_earnings_days_min", 15)),
-        "ppst_required":       _s("pb_ppst_required",     "true") == "true",
-        "ppst_pivot_period":   int(  _s("pb_ppst_pivot_period",  2)),    # TV: Pivot Point Period
-        "ppst_atr_factor":     float(_s("pb_ppst_multiplier",   3.0)),   # TV: ATR Factor
-        "ppst_atr_period":     int(  _s("pb_ppst_period",       10)),    # TV: ATR Period
-        "top_n":               int(  _s("pb_top_n",             5)),
+        "ppst_required":          _s("pb_ppst_required",     "true") == "true",
+        "ppst_pivot_period":      int(  _s("pb_ppst_pivot_period",  2)),    # TV: Pivot Point Period
+        "ppst_atr_factor":        float(_s("pb_ppst_multiplier",   3.0)),   # TV: ATR Factor
+        "ppst_atr_period":        int(  _s("pb_ppst_period",       10)),    # TV: ATR Period
+        # Earnings: block stocks whose next earnings date cannot be determined
+        "block_unknown_earnings": _s("pb_block_unknown_earnings", "true") == "true",
+        "top_n":                  int(  _s("pb_top_n",             5)),
     }
 
 
@@ -470,12 +472,20 @@ def _score_candidates(candidates: list[dict], cfg: dict) -> list[dict]:
             days_to_earnings = None
             if cfg["earnings_days_min"] > 0:
                 next_earn = get_next_earnings_date(sym)
-                if next_earn is not None:
+                if next_earn is None:
+                    # Earnings date unknown — block by default unless user opts out
+                    if cfg["block_unknown_earnings"]:
+                        logger.debug(
+                            "Pullback: %s skipped — earnings date unknown (block_unknown_earnings=true)",
+                            sym,
+                        )
+                        continue
+                else:
                     days_to_earnings = (next_earn - today).days
                     if 0 <= days_to_earnings < cfg["earnings_days_min"]:
                         logger.debug(
-                            "Pullback: %s skipped — earnings in %d days",
-                            sym, days_to_earnings,
+                            "Pullback: %s skipped — earnings in %d days (min=%d)",
+                            sym, days_to_earnings, cfg["earnings_days_min"],
                         )
                         continue
 

@@ -35,6 +35,7 @@ EDITABLE_KEYS = {
     "pb_ema50_above_ema100", "pb_ema100_above_ema200",
     "pb_ppst_required", "pb_ppst_pivot_period", "pb_ppst_period", "pb_ppst_multiplier",
     "pb_tv_screener_name",
+    "pb_block_unknown_earnings",
 }
 
 
