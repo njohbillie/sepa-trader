@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from 'react-query'
 import {
   fetchWeeklyPlan, fetchWeeklyDD, forceRefreshDD, fetchScreenerStatus,
   runScreener, runMinerviniScreener, runPullbackScreener,
-  syncTradingView, updatePlanStatus,
+  exportWatchlist, updatePlanStatus,
   fetchAnalyses, runAnalysis, fetchSettings,
 } from '../api/client'
 import TapeCheck from './TapeCheck'
@@ -147,16 +147,25 @@ export default function WeeklyPlan() {
     }
   }
 
-  async function handleSyncTV() {
+  async function handleExportWatchlist() {
     setSyncing(true)
     setMsg(null)
     try {
-      const res = await syncTradingView()
-      setMsg(res.message || 'Syncing to TradingView…')
+      const blob = await exportWatchlist()
+      // Trigger browser download
+      const url = window.URL.createObjectURL(blob)
+      const a   = document.createElement('a')
+      a.href     = url
+      a.download = 'weekly_picks.txt'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      window.URL.revokeObjectURL(url)
+      setMsg('weekly_picks.txt downloaded. In TradingView: Watchlists → ⋮ → Import list from file.')
       setMsgType('info')
-      setTimeout(() => setMsg(null), 8000)
+      setTimeout(() => setMsg(null), 12000)
     } catch (err) {
-      setMsg(err?.response?.data?.detail || 'TV sync failed — add credentials in Settings.')
+      setMsg(err?.response?.data?.detail || 'Export failed — run the screener first.')
       setMsgType('error')
     } finally {
       setSyncing(false)
@@ -222,12 +231,12 @@ export default function WeeklyPlan() {
             {analyzing ? 'Analyzing…' : 'AI Analysis'}
           </button>
           <button
-            onClick={handleSyncTV}
+            onClick={handleExportWatchlist}
             disabled={syncing || plan.length === 0}
             className="px-3 py-1.5 rounded-lg text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-200 disabled:opacity-40 transition-colors"
-            title="Push to TradingView weekly_picks"
+            title="Download weekly_picks.txt — import in TradingView: Watchlists → ⋮ → Import list from file"
           >
-            {syncing ? 'Syncing…' : 'Sync TV'}
+            {syncing ? 'Exporting…' : '↓ TV Watchlist'}
           </button>
 
           {/* Dropdown-style split run button */}
