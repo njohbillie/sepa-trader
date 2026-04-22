@@ -97,10 +97,19 @@ def run_screener(db: Session, mode: str = None, user_id: int = None) -> list[dic
     max_position_pct = float(_s("max_position_pct", "20.0") or "20.0")
 
     # --- Screener filter settings ---
-    price_min       = float(_s("screener_price_min",     "0")   or "0")
-    price_max       = float(_s("screener_price_max",     "0")   or "0")
-    top_n           = int(  _s("screener_top_n",         "10")  or "10")
-    min_score_floor = int(  _s("screener_min_score",     "0")   or "0")
+    price_min       = float(_s("screener_price_min",  "0") or "0")
+    price_max       = float(_s("screener_price_max",  "0") or "0")
+    top_n           = int(  _s("screener_top_n",      "0") or "0")
+    if top_n <= 0:
+        # Auto: target 80% deployment, one slot per max_position_pct.
+        # e.g. 20% cap → 4 positions (80% deployed, 20% cash buffer)
+        #      10% cap → 8 positions
+        top_n = max(1, int(80.0 / max_position_pct))
+        logger.info(
+            "screener_top_n: auto → %d positions (80%% target / %.0f%% max position size)",
+            top_n, max_position_pct,
+        )
+    min_score_floor = int(_s("screener_min_score", "0") or "0")
     vol_surge_pct   = float(_s("screener_vol_surge_pct", "40")  or "40")
     ema20_pct       = float(_s("screener_ema20_pct",     "2.0") or "2.0")
     ema50_pct       = float(_s("screener_ema50_pct",     "3.0") or "3.0")

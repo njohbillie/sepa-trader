@@ -124,6 +124,12 @@ def _run_migrations():
                 ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)
             """))
 
+        # ── Reset screener_top_n to auto (0) if still at old hardcoded default ─
+        db.execute(text("""
+            UPDATE settings SET value = '0'
+            WHERE key = 'screener_top_n' AND value = '10'
+        """))
+
         # ── Add 2FA columns to users table (idempotent) ──────────────────────
         db.execute(text("""
             ALTER TABLE users
@@ -139,7 +145,7 @@ def _run_migrations():
                 ('screener_schedule_time',      '20:00'),
                 ('screener_price_min',          '0'),
                 ('screener_price_max',          '0'),
-                ('screener_top_n',              '10'),
+                ('screener_top_n',              '0'),
                 ('screener_min_score',          '0'),
                 ('screener_vol_surge_pct',      '40'),
                 ('screener_ema20_pct',          '2.0'),
