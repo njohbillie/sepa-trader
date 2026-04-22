@@ -6,6 +6,7 @@ import {
   syncTradingView, updatePlanStatus,
   fetchAnalyses, runAnalysis,
 } from '../api/client'
+import TapeCheck from './TapeCheck'
 
 const SIGNAL_STYLE = {
   BREAKOUT:       'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30',
@@ -169,6 +170,9 @@ export default function WeeklyPlan() {
 
   return (
     <div className="space-y-4">
+      {/* Market tape soft-warning banner */}
+      <TapeCheck />
+
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-base font-semibold text-slate-100">Weekly Trading Plan</h3>
@@ -451,15 +455,42 @@ function DDPanel({ dd, loading, symbol }) {
         ))}
       </div>
 
-      {dd.analyst_label && dd.analyst_label !== 'N/A' && (
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-slate-500">Analyst consensus:</span>
-          <span className={`font-semibold ${dd.analyst_css || 'text-slate-300'}`}>
-            {dd.analyst_label}
-          </span>
-          {dd.analyst_count && (
-            <span className="text-slate-600">({dd.analyst_count} analysts)</span>
+      {/* Analyst consensus + price targets */}
+      {(dd.analyst_label && dd.analyst_label !== 'N/A') || dd.target_mean ? (
+        <div className="border-t border-slate-700/50 pt-3 space-y-2">
+          {dd.analyst_label && dd.analyst_label !== 'N/A' && (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-slate-500">Analyst consensus:</span>
+              <span className={`font-semibold ${dd.analyst_css || 'text-slate-300'}`}>
+                {dd.analyst_label}
+              </span>
+              {dd.analyst_count && (
+                <span className="text-slate-600">({dd.analyst_count} analysts)</span>
+              )}
+            </div>
           )}
+          {dd.target_mean != null && (
+            <div className="flex items-center gap-4 text-xs flex-wrap">
+              <div>
+                <span className="text-slate-500">Price target — </span>
+                <span className="text-slate-300 font-medium">Mean: <strong className="text-slate-100">${dd.target_mean.toFixed(2)}</strong></span>
+              </div>
+              {dd.target_high != null && (
+                <span className="text-emerald-400">High: ${dd.target_high.toFixed(2)}</span>
+              )}
+              {dd.target_low != null && (
+                <span className="text-red-400">Low: ${dd.target_low.toFixed(2)}</span>
+              )}
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {/* AI analyst summary */}
+      {dd.analyst_summary && (
+        <div className="bg-violet-500/5 border border-violet-500/20 rounded-lg px-3 py-2">
+          <p className="text-[10px] text-violet-400 uppercase tracking-wider mb-1 font-semibold">AI Summary</p>
+          <p className="text-xs text-slate-300 leading-relaxed">{dd.analyst_summary}</p>
         </div>
       )}
 

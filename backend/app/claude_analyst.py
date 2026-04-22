@@ -451,6 +451,70 @@ def analyze_picks(db: Session, picks: list[dict], closed_position: dict | None =
     return result
 
 
+def generate_analyst_summary(
+    db: Session,
+    symbol: str,
+    dd: dict,
+    user_id: int = None,
+) -> str:
+    """
+    Generate a concise AI summary of the DD data for a symbol.
+    Returns a 2–3 sentence plain-English summary, or a fallback string on failure.
+    """
+    if not get_user_setting(db, "ai_api_key", "", user_id):
+        return ""
+
+    def fmt(val, pct=False, dollar=False):
+        if val is None:
+            return "N/A"
+        if pct:
+            return f"{val * 100:.1f}%"
+        if dollar:
+            return f"${val:,.2f}"
+        return str(val)
+
+    def fmt_cap(n):
+        if n is None:
+            return "N/A"
+        if n >= 1e12:
+            return f"${n / 1e12:.1f}T"
+        if n >= 1e9:
+            return f"${n / 1e9:.1f}B"
+        if n >= 1e6:
+            return f"${n / 1e6:.0f}M"
+        return f"${n}"
+
+    target_block = ""
+    if dd.get("target_mean"):
+        target_block = (
+            f"Price targets — Mean: ${dd['target_mean']:.2f}  "
+            f"High: ${dd.get('target_high') or '?'}  "
+            f"Low: ${dd.get('target_low') or '?'}"
+        )
+
+    prompt = f"""You are a sell-side equity analyst. Write a 2–3 sentence summary of this stock's investment case for a swing trader, focusing on growth trajectory, valuation, and analyst sentiment. Be direct and concise — no fluff.
+
+Symbol: {symbol}
+Name: {dd.get('name', symbol)}
+Sector: {dd.get('sector', 'N/A')} | Industry: {dd.get('industry', 'N/A')}
+Market cap: {fmt_cap(dd.get('market_cap'))}
+P/E (TTM): {fmt(dd.get('pe_ttm'))} | Forward P/E: {fmt(dd.get('forward_pe'))}
+Revenue growth: {fmt(dd.get('revenue_growth'), pct=True)} | Earnings growth: {fmt(dd.get('earnings_growth'), pct=True)}
+Gross margin: {fmt(dd.get('gross_margin'), pct=True)} | Net margin: {fmt(dd.get('net_margin'), pct=True)}
+ROE: {fmt(dd.get('roe'), pct=True)} | D/E: {fmt(dd.get('debt_to_equity'))}
+Analyst consensus: {dd.get('analyst_label', 'N/A')} ({dd.get('analyst_count', 0)} analysts)
+{target_block}
+
+Respond with only the 2–3 sentence summary — no headings, no bullet points."""
+
+    try:
+        result = _call_ai(db, prompt, max_tokens=150, user_id=user_id)
+        return (result or "").strip()
+    except Exception as exc:
+        logger.warning("generate_analyst_summary failed for %s: %s", symbol, exc)
+        return ""
+
+
 def log_analysis(db: Session, trigger: str, symbol: str | None, analysis_text: str, mode: str, user_id: int = None):
     db.execute(
         text("""

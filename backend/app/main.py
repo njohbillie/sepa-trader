@@ -9,7 +9,7 @@ from sqlalchemy import text
 from .config import settings
 from .database import SessionLocal
 from .scheduler import start_scheduler, stop_scheduler
-from .routes import account, positions, orders, signals, settings as settings_route, webhook, screener
+from .routes import account, positions, orders, signals, settings as settings_route, webhook, screener, market as market_route
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,21 @@ def _run_migrations():
         db.execute(text("""
             ALTER TABLE weekly_plan
             ADD COLUMN IF NOT EXISTS screener_type VARCHAR(20) DEFAULT 'minervini'
+        """))
+
+        # ── Market tape cache (phase-3) ───────────────────────────────────────
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS market_tape_cache (
+                id           SERIAL PRIMARY KEY,
+                user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                cache_date   DATE NOT NULL,
+                signals      JSONB NOT NULL DEFAULT '{}',
+                verdict      VARCHAR(20) NOT NULL DEFAULT 'caution',
+                summary      TEXT NOT NULL DEFAULT '',
+                key_risk     TEXT NOT NULL DEFAULT '',
+                refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (user_id, cache_date)
+            )
         """))
 
         # ── Seed global settings (defaults) ──────────────────────────────────
@@ -279,6 +294,7 @@ app.include_router(settings_route.router)
 app.include_router(webhook.router)
 app.include_router(screener.router)
 app.include_router(strategies_route.router)
+app.include_router(market_route.router)
 
 
 @app.get("/health")

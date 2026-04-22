@@ -184,6 +184,10 @@ def fetch_dd(symbol: str) -> dict:
         rating_mean = v("financialData", "recommendationMean")
         label, css  = _rating_meta(rating_mean)
 
+        target_mean = v("financialData", "targetMeanPrice")
+        target_high = v("financialData", "targetHighPrice")
+        target_low  = v("financialData", "targetLowPrice")
+
         return {
             "symbol":          symbol,
             "name":            profile.get("longName") or profile.get("shortName") or symbol,
@@ -203,6 +207,9 @@ def fetch_dd(symbol: str) -> dict:
             "analyst_label":   label,
             "analyst_css":     css,
             "analyst_count":   v("financialData", "numberOfAnalystOpinions"),
+            "target_mean":     float(target_mean) if target_mean is not None else None,
+            "target_high":     float(target_high) if target_high is not None else None,
+            "target_low":      float(target_low)  if target_low  is not None else None,
             "description":     (profile.get("longBusinessSummary") or "")[:500],
             "error":           None,
         }
