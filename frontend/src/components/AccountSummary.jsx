@@ -1,5 +1,5 @@
 import { useQuery } from 'react-query'
-import { fetchAccountsOverview, updateSetting } from '../api/client'
+import { fetchAccountsOverview, fetchAccount } from '../api/client'
 import { useQueryClient } from 'react-query'
 
 function fmt(n, sign = false) {
@@ -28,14 +28,6 @@ function AccountCard({ acct, onModeChange }) {
               <span className="w-1 h-1 rounded-full bg-orange-400 animate-pulse" />
               Live
             </span>
-          )}
-          {onModeChange && (
-            <button
-              onClick={() => onModeChange(acct.mode === 'paper' ? 'live' : 'paper')}
-              className="text-[10px] text-slate-600 hover:text-slate-400 underline underline-offset-2 transition-colors"
-            >
-              switch
-            </button>
           )}
         </div>
       </div>
@@ -79,44 +71,17 @@ function AccountCard({ acct, onModeChange }) {
   )
 }
 
-function ModeSection({ title, accounts, mode, onModeChange, isPrimary }) {
-  const hasAccounts = accounts && accounts.length > 0
-  const liveStyle   = mode === 'live'
-    ? 'border-orange-500/20 shadow-[0_0_0_1px_rgba(249,115,22,0.1)]'
-    : 'border-border'
-
-  return (
-    <div className={`card p-4 border ${liveStyle}`}>
-      {/* Section header */}
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${mode === 'live' ? 'bg-orange-400 animate-pulse' : 'bg-blue-400'}`} />
-        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">{title}</h3>
-        {hasAccounts && (
-          <span className="ml-auto text-[10px] text-slate-600">{accounts.length} account{accounts.length > 1 ? 's' : ''}</span>
-        )}
-      </div>
-
-      {!hasAccounts ? (
-        <p className="text-xs text-slate-600 py-2">
-          No {mode} credentials configured — add Alpaca {mode} keys in Settings.
-        </p>
-      ) : (
-        <div className={`grid gap-3 ${accounts.length > 1 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
-          {accounts.map(acct => (
-            <AccountCard
-              key={acct.name}
-              acct={acct}
-              onModeChange={isPrimary && acct.name === 'Main' ? onModeChange : null}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 export default function AccountSummary({ onModeChange, refetchInterval = 5000 }) {
-  const qc = useQueryClient()
+  // Read active mode from the same 'account' query the Navbar already keeps warm —
+  // no extra network request, just shares the cache.
+  const { data: accountMeta } = useQuery('account', fetchAccount, {
+    staleTime: 5000,
+    refetchInterval,
+  })
+  const activeMode = accountMeta?.mode ?? 'paper'
+  const isPaper    = activeMode === 'paper'
+  const otherMode  = isPaper ? 'live' : 'paper'
+
   const { data, isLoading, isError, error, dataUpdatedAt } = useQuery(
     'accounts-overview',
     fetchAccountsOverview,
@@ -125,15 +90,11 @@ export default function AccountSummary({ onModeChange, refetchInterval = 5000 })
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {[...Array(2)].map((_, i) => (
-          <div key={i} className="card p-4 space-y-3 animate-pulse">
-            <div className="h-3 w-24 bg-white/5 rounded" />
-            <div className="grid grid-cols-2 gap-2">
-              {[...Array(4)].map((_, j) => <div key={j} className="stat-card h-14" />)}
-            </div>
-          </div>
-        ))}
+      <div className="card p-4 space-y-3 animate-pulse">
+        <div className="h-3 w-24 bg-white/5 rounded" />
+        <div className="grid grid-cols-2 gap-2">
+          {[...Array(4)].map((_, j) => <div key={j} className="stat-card h-14" />)}
+        </div>
       </div>
     )
   }
@@ -166,28 +127,55 @@ export default function AccountSummary({ onModeChange, refetchInterval = 5000 })
     )
   }
 
-  const paper       = data?.paper ?? []
-  const live        = data?.live  ?? []
-  const lastSync    = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null
+  const accounts   = (isPaper ? data?.paper : data?.live) ?? []
+  const lastSync   = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null
+  const liveStyle  = !isPaper
+    ? 'border-orange-500/20 shadow-[0_0_0_1px_rgba(249,115,22,0.1)]'
+    : 'border-border'
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <ModeSection
-          title="Paper Accounts"
-          accounts={paper}
-          mode="paper"
-          onModeChange={onModeChange}
-          isPrimary
-        />
-        <ModeSection
-          title="Live Accounts"
-          accounts={live}
-          mode="live"
-          onModeChange={onModeChange}
-          isPrimary
-        />
+    <div className="space-y-1.5">
+      <div className={`card p-4 border ${liveStyle}`}>
+
+        {/* Section header */}
+        <div className="flex items-center gap-2 mb-3">
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${!isPaper ? 'bg-orange-400 animate-pulse' : 'bg-blue-400'}`} />
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+            {isPaper ? 'Paper Accounts' : 'Live Accounts'}
+          </h3>
+          {accounts.length > 1 && (
+            <span className="text-[10px] text-slate-600">{accounts.length} accounts</span>
+          )}
+          {/* Switch mode button */}
+          <button
+            onClick={() => onModeChange?.(otherMode)}
+            className={`ml-auto text-[10px] font-medium px-2 py-0.5 rounded-md border transition-colors ${
+              isPaper
+                ? 'border-orange-500/30 text-orange-400/70 hover:text-orange-400 hover:bg-orange-500/10'
+                : 'border-blue-500/30 text-blue-400/70 hover:text-blue-400 hover:bg-blue-500/10'
+            }`}
+          >
+            Switch to {isPaper ? '⚡ Live' : 'Paper'}
+          </button>
+        </div>
+
+        {accounts.length === 0 ? (
+          <p className="text-xs text-slate-600 py-2">
+            No {activeMode} credentials configured — add Alpaca {activeMode} keys in Settings.
+          </p>
+        ) : (
+          <div className={`grid gap-3 ${accounts.length > 1 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
+            {accounts.map(acct => (
+              <AccountCard
+                key={acct.name}
+                acct={acct}
+                onModeChange={acct.name === 'Main' ? onModeChange : null}
+              />
+            ))}
+          </div>
+        )}
       </div>
+
       {lastSync && (
         <p className="text-[10px] text-slate-700 text-right">Synced {lastSync}</p>
       )}
