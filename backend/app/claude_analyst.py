@@ -94,17 +94,19 @@ def pre_trade_analysis(
             "warnings": [str],
             "analysis": str,
         }
-    Fails open — never silently blocks trading due to API errors.
+    Blocks trades when no AI key is configured — the gate must be actively
+    enabled, not silently bypassed.  API errors produce WARN (log + proceed)
+    so a temporary outage doesn't freeze all trading.
     """
-    # Check credentials without fetching the full key for the log message
+    # No AI key → hard block.  User must configure a key to use the gate.
     api_key_set = bool(get_user_setting(db, "ai_api_key", "", user_id))
     if not api_key_set:
-        logger.warning("pre_trade_analysis: no AI API key configured — skipping gate, proceeding.")
+        logger.warning("pre_trade_analysis: no AI API key configured — trade blocked.")
         return {
-            "proceed":  True,
-            "verdict":  "PROCEED",
-            "reason":   "AI API key not configured — gate bypassed.",
-            "warnings": ["AI API key not set — pre-trade analysis unavailable."],
+            "proceed":  False,
+            "verdict":  "HOLD",
+            "reason":   "AI API key not configured — configure one in Settings to enable pre-trade analysis.",
+            "warnings": ["No AI API key set. Go to Settings → AI to add your key."],
             "analysis": "",
         }
 
@@ -198,22 +200,26 @@ Use PROCEED when all rules pass."""
     try:
         text = _call_ai(db, prompt, max_tokens=256, user_id=user_id)
         if text is None:
+            # _call_ai returns None when no key is set — already caught above,
+            # but guard here too in case the key was removed mid-request.
             return {
-                "proceed":  True,
-                "verdict":  "PROCEED",
-                "reason":   "AI API key not configured — gate bypassed.",
-                "warnings": ["AI API key not set — pre-trade analysis unavailable."],
+                "proceed":  False,
+                "verdict":  "HOLD",
+                "reason":   "AI API key not configured — configure one in Settings to enable pre-trade analysis.",
+                "warnings": ["No AI API key set. Go to Settings → AI to add your key."],
                 "analysis": "",
             }
         return _parse_pre_trade_response(text.strip())
 
     except Exception as exc:
+        # Transient API error — warn but allow trade to continue so a
+        # temporary outage doesn't freeze all automated trading.
         logger.error("pre_trade_analysis failed for %s: %s", symbol, exc)
         return {
             "proceed":  True,
-            "verdict":  "PROCEED",
-            "reason":   f"AI API error — gate bypassed: {str(exc)[:80]}",
-            "warnings": [f"Pre-trade analysis error: {str(exc)[:80]}"],
+            "verdict":  "WARN",
+            "reason":   f"AI analysis error — proceeding with caution: {str(exc)[:80]}",
+            "warnings": [f"Pre-trade AI error (trade allowed): {str(exc)[:80]}"],
             "analysis": "",
         }
 
