@@ -7,8 +7,7 @@ DELETE /api/market/tape-check         — clear today's cache and recompute
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from ..database import get_db
-from ..auth import get_current_user
+from ..database import get_db, get_current_user
 from ..market_analysis import get_tape_check
 
 router = APIRouter(prefix="/market", tags=["market"])
