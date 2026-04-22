@@ -99,28 +99,71 @@ async def _screener_watchdog():
         db2.close()
 
 
-async def _dm_monthly_watchdog():
+def _check_circuit_breaker(vix_threshold: float, spy_drawdown_threshold: float) -> tuple[bool, str]:
+    """
+    Returns (triggered, reason) if VIX or SPY drawdown breach their thresholds.
+    Uses the same yf_client as the strategy — no extra dependencies.
+    """
+    try:
+        from .strategies.yf_client import fetch_history
+        import pandas as pd
+
+        # ── VIX check ────────────────────────────────────────────────────────
+        vix_df = fetch_history("^VIX", period_days=5)
+        if not vix_df.empty:
+            vix_now = float(vix_df["Close"].iloc[-1])
+            if vix_now >= vix_threshold:
+                return True, f"VIX {vix_now:.1f} ≥ threshold {vix_threshold:.0f}"
+
+        # ── SPY drawdown from 20-day high ────────────────────────────────────
+        spy_df = fetch_history("SPY", period_days=30)
+        if not spy_df.empty and len(spy_df) >= 5:
+            high_20d   = float(spy_df["Close"].tail(20).max())
+            spy_now    = float(spy_df["Close"].iloc[-1])
+            drawdown   = (high_20d - spy_now) / high_20d * 100
+            if drawdown >= spy_drawdown_threshold:
+                return True, f"SPY {drawdown:.1f}% below 20-day high (threshold {spy_drawdown_threshold:.0f}%)"
+
+    except Exception as exc:
+        logger.warning("circuit breaker check failed: %s", exc)
+
+    return False, ""
+
+
+async def _dm_watchdog():
     """
     Runs daily at 4:30 PM ET on weekdays.
-    Fires the Dual Momentum evaluation for every user with is_active=true
-    once per month — on whichever weekday falls on or after the configured
-    dm_eval_day (1–28, default 1). Stores last-run year-month per user to
-    prevent double-firing.
+    For each user with DM is_active=true, fires an evaluation when either:
+
+    A) Scheduled frequency elapsed:
+       - monthly  : on/after eval_day each month  (default)
+       - biweekly : every 14 days
+       - weekly   : every 7 days
+
+    B) Circuit breaker triggered (any day, regardless of frequency):
+       - VIX closes at or above vix_threshold  (default 30)
+       - SPY drops dm_spy_drawdown% below its 20-day high  (default 10%)
+       Circuit breaker fires at most once per calendar day to avoid spam.
     """
-    now_et = datetime.now(_ET)
+    now_et   = datetime.now(_ET)
+    today    = now_et.strftime("%Y-%m-%d")
 
     db = SessionLocal()
     try:
         from sqlalchemy import text as _text
         from .database import get_user_setting, set_user_setting
 
-        # Find all users with DM active
         rows = db.execute(_text("""
             SELECT sc.user_id, sc.auto_execute,
-                   COALESCE(us.value, '1') AS eval_day
+                   COALESCE(us_day.value,  '1')        AS eval_day,
+                   COALESCE(us_freq.value, 'monthly')  AS frequency,
+                   COALESCE(us_vix.value,  '30')       AS vix_threshold,
+                   COALESCE(us_dd.value,   '10')       AS spy_drawdown_threshold
             FROM strategy_config sc
-            LEFT JOIN user_settings us
-                ON us.user_id = sc.user_id AND us.key = 'dm_eval_day'
+            LEFT JOIN user_settings us_day  ON us_day.user_id  = sc.user_id AND us_day.key  = 'dm_eval_day'
+            LEFT JOIN user_settings us_freq ON us_freq.user_id = sc.user_id AND us_freq.key = 'dm_eval_frequency'
+            LEFT JOIN user_settings us_vix  ON us_vix.user_id  = sc.user_id AND us_vix.key  = 'dm_vix_threshold'
+            LEFT JOIN user_settings us_dd   ON us_dd.user_id   = sc.user_id AND us_dd.key   = 'dm_spy_drawdown_threshold'
             WHERE sc.strategy_name = 'dual_momentum'
               AND sc.is_active = true
         """)).fetchall()
@@ -128,27 +171,61 @@ async def _dm_monthly_watchdog():
         if not rows:
             return
 
-        for user_id, auto_execute, eval_day_str in rows:
+        for user_id, auto_execute, eval_day_str, frequency, vix_thr_str, dd_thr_str in rows:
             try:
-                eval_day = max(1, min(28, int(eval_day_str or "1")))
+                eval_day        = max(1,   min(28,  int(eval_day_str   or "1")))
+                vix_threshold   = max(15,  min(80,  float(vix_thr_str  or "30")))
+                spy_drawdown    = max(3,   min(30,  float(dd_thr_str   or "10")))
             except ValueError:
-                eval_day = 1
+                eval_day, vix_threshold, spy_drawdown = 1, 30.0, 10.0
 
-            # Only fire on or after eval_day in the month (first weekday ≥ eval_day)
-            if now_et.day < eval_day:
+            last_eval_date = get_user_setting(db, "dm_last_eval_date", "", user_id)
+
+            # ── A: Scheduled frequency ────────────────────────────────────────
+            scheduled = False
+            if frequency == "weekly":
+                if last_eval_date:
+                    try:
+                        from datetime import date
+                        days_ago = (now_et.date() - date.fromisoformat(last_eval_date)).days
+                        scheduled = days_ago >= 7
+                    except ValueError:
+                        scheduled = True
+                else:
+                    scheduled = True
+            elif frequency == "biweekly":
+                if last_eval_date:
+                    try:
+                        from datetime import date
+                        days_ago = (now_et.date() - date.fromisoformat(last_eval_date)).days
+                        scheduled = days_ago >= 14
+                    except ValueError:
+                        scheduled = True
+                else:
+                    scheduled = True
+            else:  # monthly
+                last_month = get_user_setting(db, "dm_last_eval_month", "", user_id)
+                this_month = now_et.strftime("%Y-%m")
+                scheduled  = (last_month != this_month) and (now_et.day >= eval_day)
+
+            # ── B: Circuit breaker ────────────────────────────────────────────
+            cb_triggered, cb_reason = False, ""
+            if not scheduled and last_eval_date != today:
+                cb_triggered, cb_reason = _check_circuit_breaker(vix_threshold, spy_drawdown)
+
+            if not scheduled and not cb_triggered:
                 continue
 
-            # Already ran this month?
-            run_key = now_et.strftime("%Y-%m")
-            last_run = get_user_setting(db, "dm_last_eval_month", "", user_id)
-            if last_run == run_key:
-                continue
+            reason = cb_reason if cb_triggered else f"{frequency} schedule"
+            if cb_triggered:
+                logger.warning("DM circuit breaker triggered for user %d: %s", user_id, cb_reason)
+            else:
+                logger.info("DM eval triggered for user %d: %s", user_id, reason)
 
-            # Mark as run before executing to prevent parallel duplicates
-            set_user_setting(db, "dm_last_eval_month", run_key, user_id)
+            # Mark run dates before executing to prevent duplicates
+            set_user_setting(db, "dm_last_eval_date",  today,                    user_id)
+            set_user_setting(db, "dm_last_eval_month", now_et.strftime("%Y-%m"), user_id)
             db.commit()
-
-            logger.info("DM monthly eval: firing for user %d (%s)", user_id, run_key)
 
             try:
                 from .strategies.dual_momentum import evaluate as dm_evaluate
@@ -162,8 +239,8 @@ async def _dm_monthly_watchdog():
                 ), {"uid": user_id, "name": STRATEGY_DM}).fetchone()
                 mode = cfg[0] if cfg else "paper"
 
-                signal     = dm_evaluate()
-                market_env = env_assess()
+                signal      = dm_evaluate()
+                market_env  = env_assess()
                 ai_decision = ai_decide(
                     db=db,
                     market_env=market_env,
@@ -176,15 +253,20 @@ async def _dm_monthly_watchdog():
                     portfolio={},
                     user_id=user_id,
                 )
+
+                # Tag the signal with what triggered it
+                signal["trigger"] = reason
                 _save_signal(db, user_id, STRATEGY_DM, signal, ai_decision, mode)
-                logger.info("DM monthly eval: user %d → %s [%s]",
-                            user_id, ai_decision.get("decision"), signal.get("recommended_symbol"))
+
+                logger.info("DM eval complete: user %d → %s [%s] (trigger: %s)",
+                            user_id, ai_decision.get("decision"),
+                            signal.get("recommended_symbol"), reason)
 
                 if auto_execute and ai_decision.get("decision") == "EXECUTE":
                     _execute_signal_bg(user_id, STRATEGY_DM, signal["recommended_symbol"], mode)
 
             except Exception as exc:
-                logger.error("DM monthly eval failed for user %d: %s", user_id, exc)
+                logger.error("DM eval failed for user %d: %s", user_id, exc)
 
     finally:
         db.close()
@@ -221,12 +303,12 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    # DM monthly evaluation — fires daily at 4:30 PM ET on weekdays,
-    # executes for each active user once per month on/after their eval_day setting
+    # DM watchdog — fires daily at 4:30 PM ET on weekdays.
+    # Handles scheduled frequency (monthly/biweekly/weekly) + VIX/drawdown circuit breakers.
     scheduler.add_job(
-        _dm_monthly_watchdog,
+        _dm_watchdog,
         CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone="America/New_York"),
-        id="dm_monthly",
+        id="dm_watchdog",
         replace_existing=True,
     )
 

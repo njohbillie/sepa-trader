@@ -307,23 +307,28 @@ function StrategySettings({ config, onSave, saving }) {
 
   if (config && !form) {
     setForm({
-      trading_mode:        config.trading_mode        || 'paper',
-      is_active:           config.is_active           || false,
-      auto_execute:        config.auto_execute        || false,
-      lookback_months:     config.settings?.lookback_months || 12,
-      eval_day:            config.settings?.eval_day  || 1,
-      alpaca_paper_key:    config.alpaca_paper_key    || '',
-      alpaca_paper_secret: config.alpaca_paper_secret || '',
-      alpaca_live_key:     config.alpaca_live_key     || '',
-      alpaca_live_secret:  config.alpaca_live_secret  || '',
+      trading_mode:           config.trading_mode                    || 'paper',
+      is_active:              config.is_active                       || false,
+      auto_execute:           config.auto_execute                    || false,
+      lookback_months:        config.settings?.lookback_months       || 12,
+      eval_day:               config.settings?.eval_day              || 1,
+      eval_frequency:         config.settings?.eval_frequency        || 'monthly',
+      vix_threshold:          config.settings?.vix_threshold         || 30,
+      spy_drawdown_threshold: config.settings?.spy_drawdown_threshold || 10,
+      alpaca_paper_key:       config.alpaca_paper_key                || '',
+      alpaca_paper_secret:    config.alpaca_paper_secret             || '',
+      alpaca_live_key:        config.alpaca_live_key                 || '',
+      alpaca_live_secret:     config.alpaca_live_secret              || '',
     })
   }
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
   const handleSave = () => form && onSave({
     ...form,
-    lookback_months: parseInt(form.lookback_months) || 12,
-    eval_day:        parseInt(form.eval_day)        || 1,
+    lookback_months:        parseInt(form.lookback_months)        || 12,
+    eval_day:               parseInt(form.eval_day)               || 1,
+    vix_threshold:          parseFloat(form.vix_threshold)        || 30,
+    spy_drawdown_threshold: parseFloat(form.spy_drawdown_threshold) || 10,
   })
 
   // Detect if dedicated keys are configured (masked value means set, empty means using shared account)
@@ -398,27 +403,78 @@ function StrategySettings({ config, onSave, saving }) {
             </div>
           </div>
 
-          {/* Lookback + Eval day */}
-          <div className="flex flex-wrap items-center gap-6">
-            <div className="flex items-center gap-3">
-              <label className="label whitespace-nowrap">Lookback Months</label>
-              <input
-                type="number" min={1} max={24}
-                value={form.lookback_months}
-                onChange={e => set('lookback_months', e.target.value)}
-                className="w-20 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
-              />
-              <span className="text-xs text-slate-600">default: 12 (Antonacci GEM)</span>
+          {/* Evaluation schedule */}
+          <div className="space-y-3">
+            <p className="label">Evaluation Schedule</p>
+            <div className="flex flex-wrap gap-4">
+              <div className="flex items-center gap-3">
+                <label className="text-xs text-slate-400 whitespace-nowrap">Frequency</label>
+                <select
+                  value={form.eval_frequency}
+                  onChange={e => set('eval_frequency', e.target.value)}
+                  className="bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50"
+                >
+                  <option value="monthly">Monthly</option>
+                  <option value="biweekly">Bi-weekly (every 2 weeks)</option>
+                  <option value="weekly">Weekly</option>
+                </select>
+              </div>
+              {form.eval_frequency === 'monthly' && (
+                <div className="flex items-center gap-3">
+                  <label className="text-xs text-slate-400 whitespace-nowrap">Eval Day</label>
+                  <input
+                    type="number" min={1} max={28}
+                    value={form.eval_day}
+                    onChange={e => set('eval_day', e.target.value)}
+                    className="w-16 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
+                  />
+                  <span className="text-xs text-slate-600">day of month (1–28)</span>
+                </div>
+              )}
+              <div className="flex items-center gap-3">
+                <label className="text-xs text-slate-400 whitespace-nowrap">Lookback</label>
+                <input
+                  type="number" min={1} max={24}
+                  value={form.lookback_months}
+                  onChange={e => set('lookback_months', e.target.value)}
+                  className="w-16 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
+                />
+                <span className="text-xs text-slate-600">months (default 12)</span>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
-              <label className="label whitespace-nowrap">Monthly Eval Day</label>
-              <input
-                type="number" min={1} max={28}
-                value={form.eval_day}
-                onChange={e => set('eval_day', e.target.value)}
-                className="w-20 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
-              />
-              <span className="text-xs text-slate-600">day of month (1–28), auto-runs at 4:30 PM ET</span>
+            <p className="text-xs text-slate-700">Evaluations fire at 4:30 PM ET on weekdays.</p>
+          </div>
+
+          {/* Circuit breakers */}
+          <div className="space-y-3">
+            <div>
+              <p className="label">Volatility Circuit Breakers</p>
+              <p className="text-xs text-slate-700 mt-1">
+                Trigger an out-of-schedule evaluation when markets spike — useful in volatile political environments.
+                Fires at most once per day to prevent spam.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-4">
+              <div className="flex items-center gap-3">
+                <label className="text-xs text-slate-400 whitespace-nowrap">VIX threshold</label>
+                <input
+                  type="number" min={15} max={80} step={1}
+                  value={form.vix_threshold}
+                  onChange={e => set('vix_threshold', e.target.value)}
+                  className="w-20 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
+                />
+                <span className="text-xs text-slate-600">trigger if VIX ≥ this (default 30)</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <label className="text-xs text-slate-400 whitespace-nowrap">SPY drawdown %</label>
+                <input
+                  type="number" min={3} max={30} step={1}
+                  value={form.spy_drawdown_threshold}
+                  onChange={e => set('spy_drawdown_threshold', e.target.value)}
+                  className="w-20 bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500/50 num text-center"
+                />
+                <span className="text-xs text-slate-600">trigger if SPY drops this % from 20-day high (default 10)</span>
+              </div>
             </div>
           </div>
 

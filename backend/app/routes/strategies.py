@@ -327,15 +327,18 @@ def get_dm_config(
 
 
 class DmConfigUpdate(BaseModel):
-    is_active:           bool  | None = None
-    auto_execute:        bool  | None = None
-    trading_mode:        str   | None = None
-    alpaca_paper_key:    str   | None = None
-    alpaca_paper_secret: str   | None = None
-    alpaca_live_key:     str   | None = None
-    alpaca_live_secret:  str   | None = None
-    lookback_months:     int   | None = None
-    eval_day:            int   | None = None
+    is_active:               bool  | None = None
+    auto_execute:            bool  | None = None
+    trading_mode:            str   | None = None
+    alpaca_paper_key:        str   | None = None
+    alpaca_paper_secret:     str   | None = None
+    alpaca_live_key:         str   | None = None
+    alpaca_live_secret:      str   | None = None
+    lookback_months:         int   | None = None
+    eval_day:                int   | None = None
+    eval_frequency:          str   | None = None   # monthly | biweekly | weekly
+    vix_threshold:           float | None = None   # circuit breaker: VIX level
+    spy_drawdown_threshold:  float | None = None   # circuit breaker: % drop from 20d high
 
 
 @router.patch("/dual-momentum/config")
@@ -372,12 +375,25 @@ def update_dm_config(
     extra_settings = {}
     if body.lookback_months is not None:
         extra_settings["lookback_months"] = body.lookback_months
+
+    from ..database import set_user_setting as _sus
     if body.eval_day is not None:
-        eval_day = max(1, min(28, body.eval_day))
-        extra_settings["eval_day"] = eval_day
-        # Also persist to user_settings so the scheduler can read it
-        from ..database import set_user_setting
-        set_user_setting(db, "dm_eval_day", str(eval_day), uid)
+        v = max(1, min(28, body.eval_day))
+        extra_settings["eval_day"] = v
+        _sus(db, "dm_eval_day", str(v), uid)
+    if body.eval_frequency is not None:
+        if body.eval_frequency in ("monthly", "biweekly", "weekly"):
+            extra_settings["eval_frequency"] = body.eval_frequency
+            _sus(db, "dm_eval_frequency", body.eval_frequency, uid)
+    if body.vix_threshold is not None:
+        v = max(15.0, min(80.0, body.vix_threshold))
+        extra_settings["vix_threshold"] = v
+        _sus(db, "dm_vix_threshold", str(v), uid)
+    if body.spy_drawdown_threshold is not None:
+        v = max(3.0, min(30.0, body.spy_drawdown_threshold))
+        extra_settings["spy_drawdown_threshold"] = v
+        _sus(db, "dm_spy_drawdown_threshold", str(v), uid)
+
     if extra_settings:
         updates.append("settings = settings || CAST(:extra AS jsonb)")
         params["extra"] = json.dumps(extra_settings)
