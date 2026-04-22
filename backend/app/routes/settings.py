@@ -40,6 +40,7 @@ EDITABLE_KEYS = {
     "pb_ema_spread_min", "pb_adx_min", "pb_52w_high_pct_max", "pb_3m_perf_min",
     "tv_chart_layout_id",
     "pb_ai_chart_review", "pb_ai_chart_min_grade",
+    "entry_order_type", "entry_slippage_pct",
 }
 
 

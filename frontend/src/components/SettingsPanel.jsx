@@ -76,6 +76,14 @@ const SECTIONS = [
       { key: 'stop_loss_pct',       label: 'Default stop loss %',                                  type: 'number' },
       { key: 'max_position_pct',    label: 'Max position size % (hard cap)',                       type: 'number' },
       { key: 'max_positions',       label: 'Max simultaneous positions',                           type: 'number' },
+      { key: 'entry_order_type', label: 'Entry order type', type: 'select',
+        options: [
+          { value: 'limit',      label: 'Limit — fills up to entry + slippage% (recommended for pullbacks)' },
+          { value: 'stop_limit', label: 'Stop-limit — activates only when price reaches entry (recommended for breakouts)' },
+          { value: 'market',     label: 'Market — immediate fill at any price (original behaviour)' },
+        ]
+      },
+      { key: 'entry_slippage_pct', label: 'Entry slippage tolerance % (default 0.5 — limit fills up to entry × 1.005)', type: 'number' },
     ],
   },
   {

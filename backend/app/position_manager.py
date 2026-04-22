@@ -138,6 +138,64 @@ def _infer_close_reason(db: Session, symbol: str, mode: str) -> tuple[str, float
         return "manual", None, None
 
 
+def _place_entry(
+    db: Session,
+    sym: str,
+    qty: float,
+    entry: float,
+    stop: float,
+    target: float,
+    trigger: str,
+    mode: str,
+) -> str:
+    """
+    Submit the entry buy using the user-configured order type.
+    Returns a short description string for logging.
+
+    entry_order_type setting:
+      market     — market order + bracket exits (original behaviour)
+      limit      — DAY limit at entry×(1+slippage%), bracket exits attached
+      stop_limit — DAY stop-limit at entry price, limit at entry×(1+slippage%);
+                   Alpaca does not support brackets here so exits are added by
+                   the monitor on the next cycle after fill
+    """
+    order_type   = get_setting(db, "entry_order_type",   "limit")
+    slippage_pct = float(get_setting(db, "entry_slippage_pct", "0.5"))
+    has_exits    = stop > 0 and target > 0
+
+    if order_type == "limit":
+        limit_px = round(entry * (1 + slippage_pct / 100), 2)
+        if has_exits:
+            try:
+                alp.place_limit_bracket_buy(sym, qty, entry, stop, target, slippage_pct, mode)
+                return f"limit bracket (lim=${limit_px} stop=${stop:.2f} tgt=${target:.2f})"
+            except Exception as exc:
+                logger.error("_place_entry: limit bracket FAILED for %s: %s — falling back to market bracket", sym, exc)
+                alp.place_bracket_buy(sym, qty, stop, target, mode)
+                return f"market bracket [limit fallback] (stop=${stop:.2f} tgt=${target:.2f})"
+        else:
+            alp.place_limit_buy(sym, qty, limit_px, mode)
+            return f"limit buy (lim=${limit_px})"
+
+    elif order_type == "stop_limit":
+        limit_px = round(entry * (1 + slippage_pct / 100), 2)
+        alp.place_stop_limit_buy(sym, qty, entry, slippage_pct, mode)
+        return f"stop-limit (stop=${entry:.2f} lim=${limit_px}) — exits pending fill"
+
+    else:  # "market" or unrecognised — original behaviour
+        if has_exits:
+            try:
+                alp.place_bracket_buy(sym, qty, stop, target, mode)
+                return f"market bracket (stop=${stop:.2f} tgt=${target:.2f})"
+            except Exception as exc:
+                logger.error("_place_entry: market bracket FAILED for %s: %s — plain market buy", sym, exc)
+                alp.place_market_buy(sym, qty, mode)
+                return f"market buy [bracket failed]"
+        else:
+            alp.place_market_buy(sym, qty, mode)
+            return f"market buy"
+
+
 def run_monday_open(db: Session):
     """
     Called every Monday at 9:35 ET. Fills available position slots from the
@@ -211,31 +269,9 @@ def run_monday_open(db: Session):
             continue
 
         try:
-            order_placed = False
-            if stop > 0 and target > 0:
-                try:
-                    alp.place_bracket_buy(sym, qty, stop, target, mode)
-                    logger.info(
-                        "Monday open: bracket buy %s qty=%.0f entry=~$%.2f stop=$%.2f target=$%.2f",
-                        sym, qty, entry, stop, target,
-                    )
-                    order_placed = True
-                except Exception as bracket_exc:
-                    logger.error(
-                        "Monday open: bracket buy FAILED for %s: %s — falling back to market buy; "
-                        "exit guard will place OCO on next cycle.",
-                        sym, bracket_exc,
-                    )
-                    alp.place_market_buy(sym, qty, mode)
-                    order_placed = True
-            else:
-                alp.place_market_buy(sym, qty, mode)
-                logger.warning(
-                    "Monday open: %s has no stop/target — plain market buy placed. "
-                    "Use 'Set Stop / Target' on the position card to add exit orders.",
-                    sym,
-                )
-                order_placed = True
+            order_desc   = _place_entry(db, sym, qty, entry, stop, target, "MONDAY_OPEN", mode)
+            order_placed = True
+            logger.info("Monday open: %s qty=%.0f — %s", sym, qty, order_desc)
 
             if not order_placed:
                 continue
@@ -463,27 +499,8 @@ def _execute_specific_pick(db: Session, mode: str, symbol: str, pending_picks: l
         return
 
     try:
-        if stop > 0 and target > 0:
-            try:
-                alp.place_bracket_buy(symbol, qty, stop, target, mode)
-                logger.info(
-                    "Slot refill: bracket buy %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
-                    symbol, qty, stop, target, mode,
-                )
-            except Exception as bracket_exc:
-                logger.error(
-                    "Slot refill: bracket buy FAILED for %s: %s — falling back to market buy; "
-                    "exit guard will place OCO on next cycle.",
-                    symbol, bracket_exc,
-                )
-                alp.place_market_buy(symbol, qty, mode)
-        else:
-            alp.place_market_buy(symbol, qty, mode)
-            logger.warning(
-                "Slot refill: %s has no stop/target — plain market buy placed. "
-                "Use 'Set Stop / Target' on the position card to add exit orders.",
-                symbol,
-            )
+        order_desc = _place_entry(db, symbol, qty, entry, stop, target, "SLOT_REFILL", mode)
+        logger.info("Slot refill: %s qty=%.0f — %s [%s]", symbol, qty, order_desc, mode)
 
         db.execute(
             text("""
@@ -555,23 +572,8 @@ def _execute_next_pick(db: Session, mode: str, held: set):
         return
 
     try:
-        if stop > 0 and target > 0:
-            try:
-                alp.place_bracket_buy(sym, qty, stop, target, mode)
-            except Exception as bracket_exc:
-                logger.error(
-                    "Post-close fallback: bracket buy FAILED for %s: %s — falling back to market buy; "
-                    "exit guard will place OCO on next cycle.",
-                    sym, bracket_exc,
-                )
-                alp.place_market_buy(sym, qty, mode)
-        else:
-            alp.place_market_buy(sym, qty, mode)
-            logger.warning(
-                "Post-close fallback: %s has no stop/target — plain market buy placed. "
-                "Use 'Set Stop / Target' on the position card to add exit orders.",
-                sym,
-            )
+        order_desc = _place_entry(db, sym, qty, entry, stop, target, "POST_CLOSE", mode)
+        logger.info("Post-close fallback: %s qty=%.0f — %s", sym, qty, order_desc)
 
         db.execute(
             text("""
