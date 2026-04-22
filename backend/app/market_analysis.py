@@ -223,11 +223,26 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 
 # ── Cache write ───────────────────────────────────────────────────────────────
 
+def _sanitize(obj):
+    """
+    Recursively walk a dict/list and replace any nan/inf Python floats with None.
+    Ensures the object is safe for both json.dumps and FastAPI's JSON response.
+    """
+    import math as _math
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, float) and (_math.isnan(obj) or _math.isinf(obj)):
+        return None
+    return obj
+
+
 def _compute_and_cache(db: Session, user_id: int, today_str: str) -> dict:
     """Compute signals, call AI, persist to cache, return result."""
     logger.info("market_analysis: computing fresh tape check for user %d", user_id)
 
-    signals   = _compute_signals()
+    signals   = _sanitize(_compute_signals())   # final safety net: no NaN/inf leaks
     condition, summary, key_risk = _ask_ai(db, signals, user_id)
 
     try:
@@ -247,7 +262,7 @@ def _compute_and_cache(db: Session, user_id: int, today_str: str) -> dict:
             {
                 "uid": user_id,
                 "d":   today_str,
-                "sig": json.dumps(signals),
+                "sig": json.dumps(signals),   # safe: NaN already removed above
                 "v":   condition,
                 "s":   summary,
                 "kr":  key_risk,
@@ -256,6 +271,10 @@ def _compute_and_cache(db: Session, user_id: int, today_str: str) -> dict:
         db.commit()
     except Exception as exc:
         logger.warning("market_analysis: cache write failed: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     return {
         "condition":    condition,
