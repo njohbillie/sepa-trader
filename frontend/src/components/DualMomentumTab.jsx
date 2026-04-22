@@ -13,6 +13,7 @@ import {
   fetchDMConfig,
   updateDMConfig,
 } from '../api/client'
+import TapeCheck from './TapeCheck'
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
 function pct(v, alreadyPercent = false) {
@@ -620,6 +621,9 @@ export default function DualMomentumTab() {
           </div>
         )}
       </div>
+
+      {/* Market tape soft-warning */}
+      <TapeCheck compact />
 
       {/* Hard block — dedicated keys required */}
       {keysRequired && (

@@ -143,6 +143,12 @@ def _run_migrations():
             ADD COLUMN IF NOT EXISTS screener_type VARCHAR(20) DEFAULT 'minervini'
         """))
 
+        # ── Per-stock AI analysis on weekly_plan (phase-4) ────────────────────
+        db.execute(text("""
+            ALTER TABLE weekly_plan
+            ADD COLUMN IF NOT EXISTS ai_analysis JSONB
+        """))
+
         # ── Market tape cache (phase-3) ───────────────────────────────────────
         db.execute(text("""
             CREATE TABLE IF NOT EXISTS market_tape_cache (

@@ -5,6 +5,7 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from sqlalchemy import text
 from .database import SessionLocal, get_setting, set_setting
 from .trader import run_monitor
 
@@ -19,7 +20,12 @@ async def _monitor_job():
     try:
         if get_setting(db, "monitor_enabled", "true") != "true":
             return
-        await run_monitor(db)
+        # Resolve admin user_id so pre-trade gate can load tape context
+        admin_row = db.execute(
+            text("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")
+        ).fetchone()
+        admin_uid = admin_row[0] if admin_row else None
+        await run_monitor(db, user_id=admin_uid)
         from .position_manager import check_post_close
         check_post_close(db)
     finally:

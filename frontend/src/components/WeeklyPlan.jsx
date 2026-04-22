@@ -308,6 +308,12 @@ export default function WeeklyPlan() {
   )
 }
 
+const AI_DECISION_META = {
+  EXECUTE: { label: 'Execute', cls: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' },
+  WAIT:    { label: 'Wait',    cls: 'bg-yellow-500/20  text-yellow-300  border border-yellow-500/30'  },
+  SKIP:    { label: 'Skip',    cls: 'bg-red-500/20     text-red-300     border border-red-500/30'     },
+}
+
 function PlanCard({ row, dd, ddLoading, onStatusChange }) {
   const [expanded, setExpanded] = useState(false)
   const [ddOpen, setDdOpen]     = useState(false)
@@ -334,6 +340,11 @@ function PlanCard({ row, dd, ddLoading, onStatusChange }) {
             {row.screener_type && SCREENER_BADGE[row.screener_type] && (
               <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-md ${SCREENER_BADGE[row.screener_type].cls}`}>
                 {SCREENER_BADGE[row.screener_type].label}
+              </span>
+            )}
+            {row.ai_analysis?.decision && AI_DECISION_META[row.ai_analysis.decision] && (
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${AI_DECISION_META[row.ai_analysis.decision].cls}`}>
+                AI: {AI_DECISION_META[row.ai_analysis.decision].label}
               </span>
             )}
             {dd && !dd.error && dd.sector && (
@@ -395,6 +406,9 @@ function PlanCard({ row, dd, ddLoading, onStatusChange }) {
           </button>
 
           {ddOpen && <DDPanel dd={dd} loading={ddLoading} symbol={row.symbol} />}
+
+          {/* Structured AI analysis */}
+          <AiAnalysisBlock ai={row.ai_analysis} />
         </div>
       )}
     </div>
@@ -508,6 +522,47 @@ function Stat({ label, value, color = 'text-slate-200' }) {
     <div>
       <div className="text-slate-500 mb-0.5">{label}</div>
       <div className={`font-medium ${color}`}>{value}</div>
+    </div>
+  )
+}
+
+function AiAnalysisBlock({ ai }) {
+  if (!ai) return null
+  const meta = AI_DECISION_META[ai.decision] || AI_DECISION_META.WAIT
+
+  return (
+    <div className="bg-violet-500/5 border border-violet-500/20 rounded-xl p-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-violet-400 uppercase tracking-wider font-semibold">AI Analysis</span>
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${meta.cls}`}>
+          {meta.label}
+        </span>
+      </div>
+
+      {ai.rationale && (
+        <p className="text-xs text-slate-300 italic leading-relaxed">{ai.rationale}</p>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        {ai.entry_zone && (
+          <div className="bg-slate-900/50 rounded-lg p-2">
+            <div className="text-[10px] text-emerald-500 uppercase tracking-wider mb-1 font-semibold">Entry zone</div>
+            <p className="text-xs text-slate-300 leading-snug">{ai.entry_zone}</p>
+          </div>
+        )}
+        {ai.exit_strategy && (
+          <div className="bg-slate-900/50 rounded-lg p-2">
+            <div className="text-[10px] text-sky-500 uppercase tracking-wider mb-1 font-semibold">Exit strategy</div>
+            <p className="text-xs text-slate-300 leading-snug">{ai.exit_strategy}</p>
+          </div>
+        )}
+        {ai.guardrails && (
+          <div className="bg-slate-900/50 rounded-lg p-2">
+            <div className="text-[10px] text-orange-500 uppercase tracking-wider mb-1 font-semibold">Guardrails</div>
+            <p className="text-xs text-slate-300 leading-snug">{ai.guardrails}</p>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

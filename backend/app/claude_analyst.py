@@ -79,6 +79,7 @@ def pre_trade_analysis(
     buying_power: float,
     mode: str,
     user_id: int = None,
+    tape_context: dict | None = None,
 ) -> dict:
     """
     Ask Claude to evaluate a proposed trade before it is placed.
@@ -135,13 +136,32 @@ def pre_trade_analysis(
     risk_pct_port    = round((risk_dollars / portfolio_value) * 100, 2) if portfolio_value > 0 else 0
     cash_after_pct   = round(((cash - trade_cost) / portfolio_value) * 100, 2) if portfolio_value > 0 else 0
 
+    # Optional tape context block
+    tape_block = ""
+    if tape_context:
+        tc = tape_context.get("condition", "caution").upper()
+        ts = tape_context.get("summary", "")
+        tr = tape_context.get("key_risk", "")
+        sigs = tape_context.get("signals", {})
+        vix = sigs.get("vix")
+        breadth = sigs.get("breadth_pct")
+        tape_block = f"""
+--- MARKET TAPE (today's broad-market context) ---
+Condition : {tc}
+Summary   : {ts}
+Key risk  : {tr}
+VIX       : {vix if vix is not None else 'N/A'}
+Breadth   : {f"{breadth}% sector ETFs above 50MA" if breadth is not None else 'N/A'}
+Note: Tape is context only — it does not override position-sizing rules. A CAUTION/UNFAVORABLE tape warrants a WARN unless rules are clearly violated (ABORT).
+"""
+
     prompt = f"""You are a risk management AI for a Minervini SEPA swing trading system.
 Evaluate this proposed trade and respond in EXACTLY this format — no other text:
 
 VERDICT: <PROCEED|WARN|ABORT>
 REASON: <one sentence ≤20 words>
 WARNINGS: <comma-separated flags, or "none">
-
+{tape_block}
 --- PROPOSED TRADE ---
 Mode:            {mode.upper()}
 Symbol:          {symbol}
@@ -513,6 +533,141 @@ Respond with only the 2–3 sentence summary — no headings, no bullet points."
     except Exception as exc:
         logger.warning("generate_analyst_summary failed for %s: %s", symbol, exc)
         return ""
+
+
+def analyze_picks_structured(
+    db: Session,
+    picks: list[dict],
+    tape_context: dict | None = None,
+    user_id: int = None,
+) -> list[dict]:
+    """
+    Structured per-stock AI analysis for the weekly plan.
+
+    Returns a list of dicts (one per PENDING pick):
+    {
+      "symbol":        str,
+      "decision":      "EXECUTE" | "WAIT" | "SKIP",
+      "entry_zone":    str,   # e.g. "Buy $152-$155 on EMA20 tag with volume"
+      "exit_strategy": str,   # e.g. "50% at 2R, trail stop to BE; full exit 3R"
+      "guardrails":    str,   # e.g. "Cut on daily close below $148"
+      "rationale":     str,   # one sentence why
+    }
+
+    Non-PENDING picks are returned with decision='N/A' and empty fields.
+    Raises ValueError if no API key configured.
+    """
+    if not get_user_setting(db, "ai_api_key", "", user_id):
+        raise ValueError("AI API key not configured in Settings.")
+
+    import json as _json
+
+    pending = [p for p in picks if str(p.get("status", "")).upper() == "PENDING"]
+    if not pending:
+        return []
+
+    # Build pick context lines
+    pick_lines = []
+    for i, p in enumerate(pending, 1):
+        ep   = float(p.get("entry_price") or 0)
+        sp   = float(p.get("stop_price")  or 0)
+        t1   = float(p.get("target1")     or 0)
+        t2   = float(p.get("target2")     or 0)
+        rr   = round((t1 - ep) / (ep - sp), 2) if ep > sp > 0 and t1 > ep else "N/A"
+        src  = p.get("screener_type", "minervini")
+        src_label = {"minervini": "Minervini/SEPA", "pullback": "Pullback-to-MA (PPST+EMA)", "both": "Both screeners"}.get(src, src)
+        pick_lines.append(
+            f"{i}. [{p['symbol']}]  source={src_label}  score={p.get('score','?')}/8"
+            f"  signal={p.get('signal','?')}"
+            f"  entry=${ep:.2f}  stop=${sp:.2f}  t1=${t1:.2f}  t2=${t2:.2f}  R:R={rr}x"
+            f"  note: {str(p.get('rationale',''))[:120]}"
+        )
+
+    tape_block = ""
+    if tape_context:
+        c = tape_context.get("condition", "caution").upper()
+        s = tape_context.get("summary", "")
+        r = tape_context.get("key_risk", "")
+        sigs = tape_context.get("signals", {})
+        vix = sigs.get("vix")
+        breadth = sigs.get("breadth_pct")
+        tape_block = f"""
+CURRENT MARKET TAPE:
+  Condition : {c}
+  Summary   : {s}
+  Key risk  : {r}
+  VIX       : {vix if vix is not None else 'N/A'}
+  Breadth   : {f"{breadth}% sector ETFs above 50MA" if breadth is not None else 'N/A'}
+"""
+
+    symbols_list = ", ".join(p["symbol"] for p in pending)
+    prompt = f"""You are a professional swing-trading analyst. Evaluate each pending pick and return a JSON array.
+
+PICKS TO EVALUATE:
+{chr(10).join(pick_lines)}
+{tape_block}
+INSTRUCTIONS:
+- For each pick provide a DECISION (EXECUTE, WAIT, or SKIP) with specific, actionable guidance.
+- entry_zone: exact price zone and condition for entry (e.g. "Buy $152-155 on EMA20 touch with vol surge")
+- exit_strategy: scale-out plan using the provided targets (e.g. "Take 50% at 2R ${'{t1}'}, trail stop to BE at 3R")
+- guardrails: concrete cut rule + any condition to avoid the trade (e.g. "Cut on daily close below ${'{stop}'}; skip if VIX > 30")
+- rationale: one sentence max (≤20 words) explaining the decision
+
+Use EXECUTE for high-quality setups (score ≥5, R:R ≥2, clean signal).
+Use WAIT for borderline setups worth monitoring.
+Use SKIP for low-quality setups or when tape is unfavorable for that setup type.
+
+Respond ONLY with a valid JSON array. No markdown fences, no explanation.
+[
+  {{
+    "symbol": "TICKER",
+    "decision": "EXECUTE",
+    "entry_zone": "...",
+    "exit_strategy": "...",
+    "guardrails": "...",
+    "rationale": "..."
+  }}
+]
+
+Symbols to include: {symbols_list}"""
+
+    try:
+        raw = _call_ai(db, prompt, max_tokens=1200, user_id=user_id)
+        if raw is None:
+            raise ValueError("AI API key not configured.")
+
+        text = raw.strip()
+        # Strip markdown fences
+        if text.startswith("```"):
+            parts = text.split("```")
+            text = parts[1] if len(parts) > 1 else text
+            if text.startswith("json"):
+                text = text[4:]
+
+        parsed: list = _json.loads(text.strip())
+        if not isinstance(parsed, list):
+            raise ValueError("AI did not return a JSON array")
+
+        # Normalise
+        result = []
+        valid_syms = {p["symbol"] for p in pending}
+        for item in parsed:
+            sym = str(item.get("symbol", "")).upper()
+            if sym not in valid_syms:
+                continue
+            result.append({
+                "symbol":        sym,
+                "decision":      str(item.get("decision", "WAIT")).upper(),
+                "entry_zone":    str(item.get("entry_zone",    "") or ""),
+                "exit_strategy": str(item.get("exit_strategy", "") or ""),
+                "guardrails":    str(item.get("guardrails",    "") or ""),
+                "rationale":     str(item.get("rationale",     "") or ""),
+            })
+        return result
+
+    except Exception as exc:
+        logger.error("analyze_picks_structured failed: %s", exc)
+        raise
 
 
 def log_analysis(db: Session, trigger: str, symbol: str | None, analysis_text: str, mode: str, user_id: int = None):

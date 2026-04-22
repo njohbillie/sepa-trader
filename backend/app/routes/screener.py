@@ -15,12 +15,14 @@ def get_weekly_plan(current_user: dict = Depends(get_current_user), db: Session 
     """Return the current week's plan for the active trading mode and user."""
     mode = get_user_setting(db, "trading_mode", "paper", current_user["id"])
     uid  = current_user["id"]
+    import json as _json
     rows = db.execute(
         text("""
             SELECT week_start, symbol, rank, score, signal,
                    entry_price, stop_price, target1, target2,
                    position_size, risk_amount, rationale, status, mode, created_at,
-                   COALESCE(screener_type, 'minervini') AS screener_type
+                   COALESCE(screener_type, 'minervini') AS screener_type,
+                   ai_analysis
             FROM weekly_plan
             WHERE week_start = (
                 SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode AND user_id = :uid
@@ -30,7 +32,17 @@ def get_weekly_plan(current_user: dict = Depends(get_current_user), db: Session 
         """),
         {"mode": mode, "uid": uid},
     ).fetchall()
-    return [dict(r._mapping) for r in rows]
+    result = []
+    for r in rows:
+        row = dict(r._mapping)
+        # Deserialise ai_analysis if stored as a string
+        if isinstance(row.get("ai_analysis"), str):
+            try:
+                row["ai_analysis"] = _json.loads(row["ai_analysis"])
+            except Exception:
+                row["ai_analysis"] = None
+        result.append(row)
+    return result
 
 
 @router.get("/status")
@@ -324,13 +336,22 @@ def get_analyses(limit: int = 20, current_user: dict = Depends(get_current_user)
 
 @router.post("/analysis/run")
 def trigger_analysis(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Manually trigger a Claude analysis of the current mode's weekly picks."""
-    from ..claude_analyst import analyze_picks, log_analysis
+    """
+    Run structured per-stock AI analysis + plain-text log for the current week's plan.
+    Stores per-stock decision in weekly_plan.ai_analysis.
+    """
+    import json as _json
+    from ..claude_analyst import analyze_picks, analyze_picks_structured, log_analysis
+    from ..market_analysis import get_tape_check
+    from fastapi import HTTPException
+
     uid  = current_user["id"]
     mode = get_user_setting(db, "trading_mode", "paper", uid)
+
     picks_rows = db.execute(
         text("""
-            SELECT symbol, score, signal, entry_price, stop_price, target1, status, rationale
+            SELECT symbol, score, signal, entry_price, stop_price, target1, target2,
+                   status, rationale, COALESCE(screener_type, 'minervini') AS screener_type
             FROM weekly_plan
             WHERE week_start = (
                 SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode AND user_id = :uid
@@ -341,15 +362,53 @@ def trigger_analysis(current_user: dict = Depends(get_current_user), db: Session
         {"mode": mode, "uid": uid},
     ).fetchall()
     if not picks_rows:
-        from fastapi import HTTPException
         raise HTTPException(404, "No weekly plan found for current mode.")
+
     picks = [dict(r._mapping) for r in picks_rows]
+
+    # Fetch today's tape context (cached — no extra LLM call)
     try:
-        analysis = analyze_picks(db, picks, user_id=uid)
-        log_analysis(db, "manual", None, analysis, mode, user_id=uid)
-        return {"analysis": analysis}
+        tape_ctx = get_tape_check(db, user_id=uid)
+    except Exception:
+        tape_ctx = None
+
+    try:
+        # 1 — Plain-text analysis for the log (existing behaviour)
+        text_analysis = analyze_picks(db, picks, user_id=uid)
+        log_analysis(db, "manual", None, text_analysis, mode, user_id=uid)
+
+        # 2 — Structured per-stock analysis
+        structured = analyze_picks_structured(db, picks, tape_context=tape_ctx, user_id=uid)
+
+        # 3 — Persist per-stock JSON back into weekly_plan.ai_analysis
+        week_start = db.execute(
+            text("SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode AND user_id = :uid"),
+            {"mode": mode, "uid": uid},
+        ).scalar()
+
+        for item in structured:
+            db.execute(
+                text("""
+                    UPDATE weekly_plan
+                    SET ai_analysis = CAST(:ai AS jsonb)
+                    WHERE symbol = :sym
+                      AND mode  = :mode
+                      AND user_id = :uid
+                      AND week_start = :ws
+                """),
+                {
+                    "ai":   _json.dumps(item),
+                    "sym":  item["symbol"],
+                    "mode": mode,
+                    "uid":  uid,
+                    "ws":   week_start,
+                },
+            )
+        db.commit()
+
+        return {"analysis": text_analysis, "structured": structured}
+
     except ValueError as exc:
-        from fastapi import HTTPException
         raise HTTPException(400, str(exc))
 
 

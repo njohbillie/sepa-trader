@@ -44,5 +44,5 @@ def signal_history(
 
 @router.post("/run-monitor")
 async def trigger_monitor(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    result = await run_monitor(db)
+    result = await run_monitor(db, user_id=current_user["id"])
     return result

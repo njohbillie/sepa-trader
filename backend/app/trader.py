@@ -323,6 +323,43 @@ def _ensure_exit_orders(
             logger.error("Exit guard: failed to place OCO for %s: %s", sym, exc)
 
 
+# ── Tape context helper ───────────────────────────────────────────────────────
+
+def _get_tape_context(db: Session, user_id: int | None) -> dict | None:
+    """
+    Return today's cached tape verdict (no LLM call).
+    Returns None if no cache row exists yet for today.
+    """
+    import json as _json
+    from datetime import date
+    from sqlalchemy import text as _text
+
+    if user_id is None:
+        return None
+    try:
+        today = date.today().isoformat()
+        row = db.execute(
+            _text("""
+                SELECT signals, verdict, summary, key_risk
+                FROM market_tape_cache
+                WHERE user_id = :uid AND cache_date = :d
+            """),
+            {"uid": user_id, "d": today},
+        ).fetchone()
+        if not row:
+            return None
+        signals = _json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        return {
+            "condition": row[1],
+            "summary":   row[2],
+            "key_risk":  row[3],
+            "signals":   signals,
+        }
+    except Exception as exc:
+        logger.debug("_get_tape_context failed (non-fatal): %s", exc)
+        return None
+
+
 # ── Pre-trade gate ────────────────────────────────────────────────────────────
 
 def _gate(
@@ -334,6 +371,7 @@ def _gate(
     target: float,
     trigger: str,
     mode: str,
+    user_id: int = None,
 ) -> bool:
     """Pre-trade AI gate. Returns True if order should proceed. Fails open."""
     try:
@@ -343,11 +381,15 @@ def _gate(
         cash         = float(acct.cash)
         buying_power = float(acct.buying_power)
 
+        # Fetch today's tape from cache (no extra LLM call; cache may be empty)
+        tape_context = _get_tape_context(db, user_id)
+
         result = pre_trade_analysis(
             db=db, symbol=symbol, side="BUY", qty=qty,
             entry_price=entry, stop_price=stop, target_price=target,
             trigger=trigger, portfolio_value=portfolio,
             cash=cash, buying_power=buying_power, mode=mode,
+            user_id=user_id, tape_context=tape_context,
         )
         log_pre_trade(
             db, symbol, trigger,
@@ -369,7 +411,7 @@ def _gate(
 
 # ── Main monitor ──────────────────────────────────────────────────────────────
 
-async def run_monitor(db: Session):
+async def run_monitor(db: Session, user_id: int | None = None):
     mode         = get_setting(db, "trading_mode", "paper")
     auto_execute = get_setting(db, "auto_execute", "true").lower() == "true"
     risk_pct     = float(get_setting(db, "risk_pct", "2.0"))
@@ -449,7 +491,7 @@ async def run_monitor(db: Session):
                     qty          = _size_position(portfolio, price, risk_pct, stop_pct, stop_price=stop)
 
                     if qty >= 1:
-                        if not _gate(db, sym, qty, price, stop, target, "BREAKOUT", mode):
+                        if not _gate(db, sym, qty, price, stop, target, "BREAKOUT", mode, user_id=user_id):
                             results.append({"sym": sym, "action": "BLOCKED_BY_AI"})
                             continue
                         try:
