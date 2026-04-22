@@ -44,29 +44,46 @@ async def _monday_open_job():
 
 async def _screener_watchdog():
     """
-    Runs every minute. Fires the screener when all three conditions are met:
+    Runs every minute. Fires the screener when all conditions are met:
       1. screener_auto_run == "true"
-      2. current ET weekday matches screener_schedule_day (0=Mon … 6=Sun)
-      3. current ET HH:MM matches screener_schedule_time
-    Tracks last run date to prevent double-firing within the same minute.
+      2. current ET weekday is in screener_schedule_days (comma-separated 0–6)
+         Falls back to legacy screener_schedule_day (single int) if not set.
+      3. current ET HH:MM is in screener_schedule_times (comma-separated)
+         Falls back to legacy screener_schedule_time if not set.
+    Tracks last run per slot (YYYY-MM-DD HH:MM) to prevent double-firing.
     """
     db = SessionLocal()
     try:
         if get_setting(db, "screener_auto_run", "true") != "true":
             return
 
-        day_setting  = int(get_setting(db, "screener_schedule_day",  "6"))
-        time_setting = get_setting(db, "screener_schedule_time", "20:00")
-
         now_et = datetime.now(_ET)
-        if now_et.weekday() != day_setting:
+
+        # ── Days: multi (new) → single legacy fallback ────────────────────────
+        days_raw = get_setting(db, "screener_schedule_days", "").strip()
+        if days_raw:
+            try:
+                schedule_days = {int(d.strip()) for d in days_raw.split(",") if d.strip().isdigit()}
+            except ValueError:
+                schedule_days = set()
+        else:
+            try:
+                schedule_days = {int(get_setting(db, "screener_schedule_day", "6"))}
+            except ValueError:
+                schedule_days = {6}
+
+        if now_et.weekday() not in schedule_days:
             return
 
-        try:
-            h, m = map(int, time_setting.split(":"))
-        except ValueError:
-            return
-        if now_et.hour != h or now_et.minute != m:
+        # ── Times: multi (new) → single legacy fallback ───────────────────────
+        times_raw = get_setting(db, "screener_schedule_times", "").strip()
+        if times_raw:
+            schedule_times = {t.strip() for t in times_raw.split(",") if t.strip()}
+        else:
+            schedule_times = {get_setting(db, "screener_schedule_time", "20:00")}
+
+        current_hm = now_et.strftime("%H:%M")
+        if current_hm not in schedule_times:
             return
 
         run_key = now_et.strftime("%Y-%m-%d %H:%M")

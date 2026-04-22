@@ -16,7 +16,9 @@ EDITABLE_KEYS = {
     "screener_universe",
     "screener_price_min", "screener_price_max", "screener_top_n",
     "screener_min_score", "screener_vol_surge_pct", "screener_ema20_pct", "screener_ema50_pct",
-    "screener_auto_run", "screener_schedule_day", "screener_schedule_time",
+    "screener_auto_run",
+    "screener_schedule_day", "screener_schedule_time",       # legacy (single day/time)
+    "screener_schedule_days", "screener_schedule_times",     # multi-day / multi-time
     "tv_username", "tv_password",
     # AI provider settings
     "ai_provider", "ai_api_key", "ai_model", "ai_base_url",
