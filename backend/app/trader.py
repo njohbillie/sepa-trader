@@ -463,7 +463,7 @@ async def run_monitor(db: Session, user_id: int | None = None):
         for pos in positions:
             sym    = pos.symbol
             qty    = float(pos.qty)
-            result = analyze(sym)
+            result = analyze(sym, db=db)
             signal = result.get("signal", "ERROR")
 
             _log_signal(db, sym, signal, result.get("score", 0), result.get("price"), mode)
@@ -490,7 +490,7 @@ async def run_monitor(db: Session, user_id: int | None = None):
             for sym in watchlist:
                 if sym in held_symbols:
                     continue
-                result = analyze(sym)
+                result = analyze(sym, db=db)
                 signal = result.get("signal")
                 _log_signal(db, sym, signal, result.get("score", 0), result.get("price"), mode)
 

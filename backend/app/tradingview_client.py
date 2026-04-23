@@ -289,6 +289,22 @@ def run_saved_screener(
     )
 
 
+def get_session_cookie(username: str, password: str) -> str:
+    """
+    Sign in to TradingView and return the session cookie string
+    suitable for use in an HTTP Cookie header.
+    Returns empty string on failure.
+    """
+    try:
+        cookies, _ = _signin(username, password)
+        # Build a Cookie header string from the dict
+        return "; ".join(f"{k}={v}" for k, v in cookies.items())
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("get_session_cookie failed: %s", exc)
+        return ""
+
+
 def update_weekly_picks(
     username: str,
     password: str,
