@@ -6,6 +6,21 @@ import TwoFactorSetup from './TwoFactorSetup'
 const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 const EXCHANGES = ['NYSE', 'NASDAQ', 'AMEX', 'CBOE', 'OTC']
 
+// All TradingView sectors with short display labels and growth classification
+const ALL_SECTORS = [
+  { name: 'Technology',             short: 'Tech',         growth: true  },
+  { name: 'Communication Services', short: 'Comms',        growth: true  },
+  { name: 'Consumer Cyclical',      short: 'Cons. Cycl.',  growth: true  },
+  { name: 'Healthcare',             short: 'Healthcare',   growth: true  },
+  { name: 'Industrials',            short: 'Industrials',  growth: true  },
+  { name: 'Consumer Defensive',     short: 'Cons. Def.',   growth: false },
+  { name: 'Financial Services',     short: 'Financials',   growth: false },
+  { name: 'Basic Materials',        short: 'Materials',    growth: false },
+  { name: 'Energy',                 short: 'Energy',       growth: false },
+  { name: 'Real Estate',            short: 'Real Estate',  growth: false },
+  { name: 'Utilities',              short: 'Utilities',    growth: false },
+]
+
 const SECTIONS = [
   {
     title: 'Trading',
@@ -50,7 +65,7 @@ const SECTIONS = [
       { key: 'pb_ema20_above_ema50',   label: 'Require EMA20 > EMA50',    type: 'toggle', defaultValue: 'true' },
       { key: 'pb_ema50_above_ema100',  label: 'Require EMA50 > EMA100',   type: 'toggle', defaultValue: 'true' },
       { key: 'pb_ema100_above_ema200', label: 'Require EMA100 > EMA200',  type: 'toggle', defaultValue: 'true' },
-      { key: 'pb_excluded_sectors',    label: 'Excluded sectors (comma-separated — blocks commodity/defensive names)', type: 'text', span: true,
+      { key: 'pb_excluded_sectors', label: 'Excluded sectors', type: 'sector_picker', span: true,
         defaultValue: 'Consumer Defensive,Energy,Utilities,Real Estate,Basic Materials,Financial Services' },
       { key: 'pb_min_revenue_growth',  label: 'Min revenue growth % YoY (0 = off, e.g. 10 = require ≥10% top-line growth)', type: 'number', defaultValue: '0' },
       { key: 'pb_ai_chart_review',    label: 'AI chart review — analyse price action per candidate before finalising (requires AI key)', type: 'toggle', defaultValue: 'false' },
@@ -405,6 +420,73 @@ function Field({ field, value, saving, onSave,
         </div>
         <p className="text-[10px] text-slate-500 mt-1.5">
           NYSE + NASDAQ covers ~95% of liquid US equities. Add AMEX for small-caps, OTC for pink sheets.
+        </p>
+      </div>
+    )
+  }
+
+  if (field.type === 'sector_picker') {
+    const defaultVal = field.defaultValue || 'Consumer Defensive,Energy,Utilities,Real Estate,Basic Materials,Financial Services'
+    const excluded = new Set(
+      (current || defaultVal).split(',').map(s => s.trim()).filter(Boolean)
+    )
+    function toggleSector(name) {
+      const next = new Set(excluded)
+      if (next.has(name)) next.delete(name); else next.add(name)
+      const val = ALL_SECTORS.filter(s => next.has(s.name)).map(s => s.name).join(',')
+      setLocal(val)
+      onSave(val)
+    }
+    const growthSectors = ALL_SECTORS.filter(s => s.growth)
+    const defensiveSectors = ALL_SECTORS.filter(s => !s.growth)
+    return (
+      <div className="bg-surface rounded-lg p-3">
+        <label className="text-xs text-slate-400 block mb-1">{field.label}</label>
+        <p className="text-[10px] text-slate-500 mb-2">
+          Highlighted sectors are <span className="text-red-400 font-medium">blocked</span>. Click to toggle. Growth sectors are shown first.
+        </p>
+        <div className="space-y-2">
+          <div>
+            <p className="text-[10px] text-emerald-500 font-medium uppercase tracking-wide mb-1">Growth</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {growthSectors.map(s => (
+                <button
+                  key={s.name}
+                  onClick={() => toggleSector(s.name)}
+                  disabled={saving}
+                  title={s.name}
+                  className={`px-2.5 py-1 rounded text-xs font-medium transition-colors disabled:opacity-50 ${
+                    excluded.has(s.name)
+                      ? 'bg-red-500/30 text-red-300 ring-1 ring-red-500/50'
+                      : 'bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25'
+                  }`}
+                >{s.short}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="text-[10px] text-slate-500 font-medium uppercase tracking-wide mb-1">Defensive / Commodity</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {defensiveSectors.map(s => (
+                <button
+                  key={s.name}
+                  onClick={() => toggleSector(s.name)}
+                  disabled={saving}
+                  title={s.name}
+                  className={`px-2.5 py-1 rounded text-xs font-medium transition-colors disabled:opacity-50 ${
+                    excluded.has(s.name)
+                      ? 'bg-red-500/30 text-red-300 ring-1 ring-red-500/50'
+                      : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                  }`}
+                >{s.short}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <p className="text-[10px] text-slate-500 mt-2">
+          {excluded.size === 0
+            ? '⚠ No sectors blocked — all sectors allowed through'
+            : `${excluded.size} sector${excluded.size > 1 ? 's' : ''} blocked`}
         </p>
       </div>
     )
