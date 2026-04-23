@@ -1,6 +1,6 @@
 import logging
 import secrets
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager  # noqa: F401
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
