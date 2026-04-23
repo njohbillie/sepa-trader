@@ -412,10 +412,19 @@ def _gate(
 # ── Main monitor ──────────────────────────────────────────────────────────────
 
 async def run_monitor(db: Session, user_id: int | None = None):
-    mode         = get_setting(db, "trading_mode", "paper")
-    auto_execute = get_setting(db, "auto_execute", "true").lower() == "true"
-    risk_pct     = float(get_setting(db, "risk_pct", "2.0"))
-    stop_pct     = float(get_setting(db, "stop_loss_pct", "8.0"))
+    # Use merged user+global settings so UI changes to trading_mode are respected
+    if user_id:
+        from .database import get_all_user_settings as _gaus
+        _s = _gaus(db, user_id)
+        mode         = _s.get("trading_mode", "paper")
+        auto_execute = _s.get("auto_execute", "true").lower() == "true"
+        risk_pct     = float(_s.get("risk_pct", "2.0") or "2.0")
+        stop_pct     = float(_s.get("stop_loss_pct", "8.0") or "8.0")
+    else:
+        mode         = get_setting(db, "trading_mode", "paper")
+        auto_execute = get_setting(db, "auto_execute", "true").lower() == "true"
+        risk_pct     = float(get_setting(db, "risk_pct", "2.0"))
+        stop_pct     = float(get_setting(db, "stop_loss_pct", "8.0"))
 
     try:
         clock       = alp.get_clock(mode)
