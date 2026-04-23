@@ -202,7 +202,8 @@ def trigger_screener(
 ):
     """Start BOTH screeners (Minervini + Pullback) in background."""
     uid  = current_user["id"]
-    mode = get_user_setting(db, "trading_mode", "paper", uid)
+    mode = get_all_user_settings(db, uid).get("trading_mode", "paper")
+    log.info("Screener /run triggered: uid=%s mode=%s (from merged settings)", uid, mode)
     set_user_setting(db, "screener_status",     "running",            uid)
     set_user_setting(db, "screener_error",      "",                   uid)
     set_user_setting(db, "screener_phase",      "Starting…",          uid)
@@ -249,7 +250,8 @@ def trigger_minervini_screener(
 ):
     """Run only the Minervini (SEPA) screener in background."""
     uid  = current_user["id"]
-    mode = get_user_setting(db, "trading_mode", "paper", uid)
+    mode = get_all_user_settings(db, uid).get("trading_mode", "paper")
+    log.info("Screener /run-minervini triggered: uid=%s mode=%s (from merged settings)", uid, mode)
     set_user_setting(db, "screener_status",     "running",        uid)
     set_user_setting(db, "screener_error",      "",               uid)
     set_user_setting(db, "screener_phase",      "Starting…",      uid)
@@ -296,7 +298,8 @@ def trigger_pullback_screener(
 ):
     """Run only the Pullback-to-MA screener in background."""
     uid  = current_user["id"]
-    mode = get_user_setting(db, "trading_mode", "paper", uid)
+    mode = get_all_user_settings(db, uid).get("trading_mode", "paper")
+    log.info("Screener /run-pullback triggered: uid=%s mode=%s (from merged settings)", uid, mode)
     set_user_setting(db, "screener_status",     "running",        uid)
     set_user_setting(db, "screener_error",      "",               uid)
     set_user_setting(db, "screener_phase",      "Starting…",      uid)
