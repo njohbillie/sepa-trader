@@ -654,3 +654,140 @@ def _run_claude_analysis(db: Session, closed_sym: str, mode: str):
 
     except Exception as exc:
         logger.warning("Post-close analysis failed for %s: %s", closed_sym, exc)
+
+
+def fill_open_slots(db: Session, mode: str = None, user_id: int | None = None):
+    """
+    Called every monitor cycle. Buys PENDING picks from the current weekly_plan
+    when open position slots exist. Syncs bought-today entries to EXECUTED first
+    so we don't double-buy.
+    """
+    from .database import get_all_user_settings
+
+    _s = get_all_user_settings(db, user_id)
+    if mode is None:
+        mode = _s.get("trading_mode", "paper")
+
+    if _s.get("auto_execute", "true").lower() != "true":
+        logger.info("fill_open_slots: auto_execute off — skipping.")
+        return
+
+    # ── Sync: mark already-held + bought-today as EXECUTED ───────────────────
+    try:
+        positions    = alp.get_positions(mode)
+        held_symbols = {p.symbol for p in positions}
+    except Exception as exc:
+        logger.error("fill_open_slots: cannot fetch positions — %s", exc)
+        return
+
+    try:
+        bought_today = {r[0] for r in db.execute(
+            text("""SELECT DISTINCT symbol FROM trade_log
+                    WHERE action = 'BUY' AND mode = :mode
+                    AND created_at >= CURRENT_DATE"""),
+            {"mode": mode},
+        ).fetchall()}
+    except Exception:
+        bought_today = set()
+
+    already_active = held_symbols | bought_today
+    if already_active:
+        db.execute(
+            text("""
+                UPDATE weekly_plan SET status = 'EXECUTED'
+                WHERE week_start = (SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode)
+                  AND mode = :mode
+                  AND symbol = ANY(:syms)
+                  AND status = 'PENDING'
+            """),
+            {"mode": mode, "syms": list(already_active)},
+        )
+        db.commit()
+
+    # ── Capacity check ────────────────────────────────────────────────────────
+    max_pos = _effective_max_positions(db, mode)
+    slots   = max_pos - len(positions)
+    if slots <= 0:
+        logger.info("fill_open_slots: portfolio full (%d/%d) [%s]", len(positions), max_pos, mode)
+        return
+
+    # ── Fetch PENDING picks (exclude held) ────────────────────────────────────
+    rows = db.execute(
+        text("""
+            SELECT symbol, entry_price, stop_price, target1,
+                   COALESCE(screener_type, 'minervini') AS screener_type
+            FROM weekly_plan
+            WHERE week_start = (SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode)
+              AND mode = :mode
+              AND status = 'PENDING'
+            ORDER BY rank ASC
+            LIMIT :slots
+        """),
+        {"mode": mode, "slots": slots},
+    ).fetchall()
+
+    if not rows:
+        logger.info("fill_open_slots: no PENDING picks for mode=%s.", mode)
+        return
+
+    try:
+        acct      = alp.get_account(mode)
+        portfolio = float(acct.portfolio_value)
+    except Exception as exc:
+        logger.error("fill_open_slots: account fetch failed — %s", exc)
+        return
+
+    risk_pct = float(_s.get("risk_pct", "2.0") or "2.0")
+    stop_pct = float(_s.get("stop_loss_pct", "8.0") or "8.0")
+    held     = set(already_active)
+
+    for row in rows:
+        sym    = row[0]
+        entry  = float(row[1] or 0)
+        stop   = float(row[2] or 0)
+        target = float(row[3] or 0)
+        stype  = row[4]
+
+        if sym in held or entry <= 0:
+            continue
+
+        # 8-hour sell cooldown: don't re-enter same day after a close
+        sell_row = db.execute(
+            text("""SELECT 1 FROM trade_log
+                    WHERE symbol = :s AND action = 'SELL' AND mode = :mode
+                    AND created_at >= NOW() - INTERVAL '8 hours'
+                    LIMIT 1"""),
+            {"s": sym, "mode": mode},
+        ).fetchone()
+        if sell_row:
+            logger.info("fill_open_slots: %s sold within 8h — skipping.", sym)
+            continue
+
+        qty = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
+        if qty < 1:
+            logger.info("fill_open_slots: %s size < 1 share — skipping.", sym)
+            continue
+
+        if not _gate(db, sym, qty, entry, stop, target, "FILL_STAGE2", mode):
+            continue
+
+        try:
+            order_desc = _place_entry(db, sym, qty, entry, stop, target, "FILL_STAGE2", mode, stype)
+            logger.info("fill_open_slots: bought %s qty=%.0f — %s [%s]", sym, qty, order_desc, mode)
+
+            db.execute(
+                text("""UPDATE weekly_plan SET status = 'EXECUTED'
+                        WHERE symbol = :sym AND mode = :mode
+                          AND week_start = (SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode)"""),
+                {"sym": sym, "mode": mode},
+            )
+            db.execute(
+                text("""INSERT INTO trade_log (symbol, action, qty, price, trigger, mode)
+                        VALUES (:s, 'BUY', :q, :p, 'FILL_STAGE2', :m)"""),
+                {"s": sym, "q": qty, "p": entry, "m": mode},
+            )
+            db.commit()
+            held.add(sym)
+
+        except Exception as exc:
+            logger.error("fill_open_slots: buy failed for %s: %s", sym, exc)

@@ -35,6 +35,31 @@ def get_client(mode: str = "paper") -> TradingClient:
     return _clients[mode]
 
 
+def configure_from_db_settings(merged: dict, mode: str, is_admin: bool = True) -> None:
+    """Override the cached client for `mode` using credentials from merged user_settings.
+    Falls back to .env values when `is_admin=True` and DB values are empty.
+    Call this at the start of background jobs that run on behalf of a specific user.
+    """
+    if mode == "paper":
+        key    = (merged.get("alpaca_paper_key")    or "").strip()
+        secret = (merged.get("alpaca_paper_secret") or "").strip()
+        if is_admin:
+            key    = key    or (settings.alpaca_paper_key    or "").strip()
+            secret = secret or (settings.alpaca_paper_secret or "").strip()
+        paper = True
+    else:
+        key    = (merged.get("alpaca_live_key")    or "").strip()
+        secret = (merged.get("alpaca_live_secret") or "").strip()
+        if is_admin:
+            key    = key    or (settings.alpaca_live_key    or "").strip()
+            secret = secret or (settings.alpaca_live_secret or "").strip()
+        paper = False
+    if not key or not secret:
+        raise ValueError(f"No Alpaca credentials configured for mode={mode}")
+    _clients[mode] = TradingClient(api_key=key, secret_key=secret, paper=paper)
+    logger.info("configure_from_db_settings: updated %s client (key=%.8s…)", mode, key)
+
+
 def get_client_for_keys(api_key: str, secret_key: str, paper: bool) -> TradingClient:
     """Create a TradingClient from explicit credentials (per-user API requests).
     Strips surrounding whitespace so copy-paste artefacts don't cause 401s.

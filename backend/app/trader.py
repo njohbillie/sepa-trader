@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from . import alpaca_client as alp
 from .sepa_analyzer import analyze
-from .database import get_setting
+from .database import get_setting, get_all_user_settings
 from . import telegram_alerts as tg
 
 logger = logging.getLogger(__name__)
@@ -412,10 +412,16 @@ def _gate(
 # ── Main monitor ──────────────────────────────────────────────────────────────
 
 async def run_monitor(db: Session, user_id: int | None = None):
-    mode         = get_setting(db, "trading_mode", "paper")
-    auto_execute = get_setting(db, "auto_execute", "true").lower() == "true"
-    risk_pct     = float(get_setting(db, "risk_pct", "2.0"))
-    stop_pct     = float(get_setting(db, "stop_loss_pct", "8.0"))
+    _s           = get_all_user_settings(db, user_id)
+    mode         = _s.get("trading_mode", "paper")
+    auto_execute = _s.get("auto_execute", "true").lower() == "true"
+    risk_pct     = float(_s.get("risk_pct", "2.0") or "2.0")
+    stop_pct     = float(_s.get("stop_loss_pct", "8.0") or "8.0")
+
+    try:
+        alp.configure_from_db_settings(_s, mode, is_admin=(user_id is not None))
+    except ValueError as exc:
+        logger.warning("run_monitor: cannot configure Alpaca client — %s", exc)
 
     try:
         clock       = alp.get_clock(mode)
@@ -472,9 +478,19 @@ async def run_monitor(db: Session, user_id: int | None = None):
 
             results.append({"sym": sym, "signal": signal})
 
-        # Step 4: Watchlist breakout entries
+        # Step 4: Fill open slots from weekly_plan PENDING picks
+        if auto_execute and market_open:
+            try:
+                from .position_manager import fill_open_slots
+                fill_open_slots(db, mode=mode, user_id=user_id)
+            except Exception as exc:
+                logger.error("fill_open_slots failed: %s", exc)
+            # Re-fetch positions after potential new buys
+            positions = alp.get_positions(mode)
+
+        # Step 5: Watchlist breakout entries
         held_symbols = {p.symbol for p in positions}
-        watchlist    = _get_watchlist(db)
+        watchlist    = _get_watchlist(db, user_id=user_id)
         max_pos      = _effective_max_positions(db, mode)
 
         if auto_execute and market_open and len(positions) < max_pos:
@@ -526,11 +542,11 @@ async def run_monitor(db: Session, user_id: int | None = None):
         return {"status": "error", "error": str(exc)}
 
 
-def _get_watchlist(db: Session) -> list[str]:
-    row = db.execute(text("SELECT value FROM settings WHERE key = 'watchlist'")).fetchone()
-    if not row or not row[0]:
+def _get_watchlist(db: Session, user_id: int | None = None) -> list[str]:
+    raw = get_all_user_settings(db, user_id).get("watchlist", "")
+    if not raw:
         return []
-    return [s.strip().upper() for s in row[0].split(",") if s.strip()]
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
 
 
 def _log_signal(db: Session, symbol: str, signal: str, score: int, price, mode: str):

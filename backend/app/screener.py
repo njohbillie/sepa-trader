@@ -372,6 +372,26 @@ def _get_portfolio_value(db: Session, mode: str, user_id: int = None) -> float:
 
 
 def _save_plan(db: Session, rows: list[dict], week_start: str, mode: str, user_id: int = None):
+    # Snapshot symbols that are already EXECUTED so we don't clobber them on re-run
+    already_executed = {r[0] for r in db.execute(
+        text("""SELECT symbol FROM weekly_plan
+                WHERE week_start = :w AND mode = :m
+                AND user_id IS NOT DISTINCT FROM :uid AND status = 'EXECUTED'"""),
+        {"w": week_start, "m": mode, "uid": user_id},
+    ).fetchall()}
+
+    # Also treat anything bought today (in trade_log) as executed
+    try:
+        bought_today = {r[0] for r in db.execute(
+            text("""SELECT DISTINCT symbol FROM trade_log
+                    WHERE action = 'BUY' AND mode = :mode
+                    AND created_at >= CURRENT_DATE"""),
+            {"mode": mode},
+        ).fetchall()}
+        already_executed |= bought_today
+    except Exception:
+        pass
+
     db.execute(
         text("DELETE FROM weekly_plan WHERE week_start = :w AND mode = :m AND user_id IS NOT DISTINCT FROM :uid"),
         {"w": week_start, "m": mode, "uid": user_id},
@@ -379,6 +399,8 @@ def _save_plan(db: Session, rows: list[dict], week_start: str, mode: str, user_i
     for r in rows:
         row = {**r, "user_id": user_id}
         row.setdefault("screener_type", "minervini")
+        if row.get("symbol") in already_executed:
+            row["status"] = "EXECUTED"
         db.execute(
             text("""
                 INSERT INTO weekly_plan
