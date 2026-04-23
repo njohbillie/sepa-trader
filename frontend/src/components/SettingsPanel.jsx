@@ -85,7 +85,9 @@ const SECTIONS = [
       { key: 'risk_pct',            label: 'Risk per trade %',                                     type: 'number' },
       { key: 'stop_loss_pct',       label: 'Default stop loss %',                                  type: 'number' },
       { key: 'max_position_pct',    label: 'Max position size % (hard cap)',                       type: 'number' },
-      { key: 'max_positions',       label: 'Max simultaneous positions',                           type: 'number' },
+      { key: 'max_positions',       label: 'Max simultaneous positions (overall cap)',              type: 'number' },
+      { key: 'mv_max_slots',        label: 'Minervini slots (breakout picks, default 3)',           type: 'number' },
+      { key: 'pb_max_slots',        label: 'Pullback slots (EMA picks, default 2)',                 type: 'number' },
       { key: 'mv_entry_order_type', label: 'Minervini entry order type', type: 'select',
         options: [
           { value: 'stop_limit', label: 'Stop-limit — activates only when price breaks out (recommended for Minervini)' },

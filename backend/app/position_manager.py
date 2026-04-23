@@ -205,11 +205,58 @@ def _place_entry(
             return f"market buy"
 
 
+def _count_positions_by_type(db: Session, mode: str, symbols: set) -> tuple[int, int]:
+    """
+    Return (mv_count, pb_count) of currently held positions by screener type.
+    Looks up the screener_type from the most recent EXECUTED weekly_plan row.
+    'both' and 'minervini' count toward mv; 'pullback' counts toward pb.
+    """
+    if not symbols:
+        return 0, 0
+    rows = db.execute(
+        text("""
+            SELECT COALESCE(screener_type, 'minervini') AS stype, COUNT(*) AS cnt
+            FROM (
+                SELECT DISTINCT ON (symbol) symbol, screener_type
+                FROM weekly_plan
+                WHERE symbol IN :syms AND mode = :mode AND status = 'EXECUTED'
+                ORDER BY symbol, week_start DESC
+            ) sub
+            GROUP BY stype
+        """),
+        {"syms": tuple(symbols), "mode": mode},
+    ).fetchall()
+    mv, pb = 0, 0
+    for stype, cnt in rows:
+        if stype in ("minervini", "both"):
+            mv += cnt
+        else:
+            pb += cnt
+    return mv, pb
+
+
+def _get_symbol_screener_type(db: Session, symbol: str, mode: str) -> str:
+    """Return the screener_type of the most recent plan row for this symbol."""
+    row = db.execute(
+        text("""
+            SELECT COALESCE(screener_type, 'minervini')
+            FROM weekly_plan
+            WHERE symbol = :sym AND mode = :mode
+            ORDER BY week_start DESC LIMIT 1
+        """),
+        {"sym": symbol, "mode": mode},
+    ).fetchone()
+    return row[0] if row else "minervini"
+
+
 def run_monday_open(db: Session):
     """
     Called every Monday at 9:35 ET. Fills available position slots from the
-    current week's PENDING picks for the active mode. Respects max_positions.
-    Pre-trade AI gate runs before every buy.
+    current week's PENDING picks using dedicated per-strategy slot allocation.
+
+    mv_max_slots — max Minervini (breakout) positions at any time (default 3)
+    pb_max_slots — max Pullback positions at any time (default 2)
+    Both are still capped by the overall max_positions setting.
     """
     mode      = get_setting(db, "trading_mode", "paper")
     auto_exec = get_setting(db, "auto_execute", "true").lower() == "true"
@@ -218,6 +265,8 @@ def run_monday_open(db: Session):
         return
 
     max_pos = _effective_max_positions(db, mode)
+    mv_max  = int(get_setting(db, "mv_max_slots", "3") or "3")
+    pb_max  = int(get_setting(db, "pb_max_slots", "2") or "2")
 
     try:
         positions = alp.get_positions(mode)
@@ -225,26 +274,53 @@ def run_monday_open(db: Session):
         logger.error("Monday open: could not fetch positions: %s", exc)
         return
 
-    slots = max_pos - len(positions)
-    if slots <= 0:
-        logger.info("Monday open: portfolio full (%d/%d). No buys.", len(positions), max_pos)
+    total_held = len(positions)
+    if total_held >= max_pos:
+        logger.info("Monday open: portfolio full (%d/%d). No buys.", total_held, max_pos)
         return
 
-    rows = db.execute(
+    held_symbols   = {p.symbol for p in positions}
+    mv_held, pb_held = _count_positions_by_type(db, mode, held_symbols)
+
+    mv_slots = min(max(0, mv_max - mv_held), max_pos - total_held)
+    pb_slots = min(max(0, pb_max - pb_held), max_pos - total_held - mv_slots)
+
+    logger.info(
+        "Monday open [%s]: held=%d (mv=%d pb=%d) | slots: mv=%d pb=%d | max_pos=%d",
+        mode, total_held, mv_held, pb_held, mv_slots, pb_slots, max_pos,
+    )
+
+    # Fetch Minervini picks (screener_type = 'minervini' or 'both')
+    mv_rows = db.execute(
         text("""
             SELECT symbol, entry_price, stop_price, target1,
                    COALESCE(screener_type, 'minervini') AS screener_type
             FROM weekly_plan
-            WHERE week_start = (
-                SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
-            )
-              AND mode = :mode
-              AND status = 'PENDING'
+            WHERE week_start = (SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode)
+              AND mode = :mode AND status = 'PENDING'
+              AND COALESCE(screener_type, 'minervini') IN ('minervini', 'both')
             ORDER BY rank ASC
             LIMIT :slots
         """),
-        {"slots": slots, "mode": mode},
-    ).fetchall()
+        {"slots": mv_slots, "mode": mode},
+    ).fetchall() if mv_slots > 0 else []
+
+    # Fetch Pullback picks (screener_type = 'pullback')
+    pb_rows = db.execute(
+        text("""
+            SELECT symbol, entry_price, stop_price, target1,
+                   COALESCE(screener_type, 'minervini') AS screener_type
+            FROM weekly_plan
+            WHERE week_start = (SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode)
+              AND mode = :mode AND status = 'PENDING'
+              AND COALESCE(screener_type, 'minervini') = 'pullback'
+            ORDER BY rank ASC
+            LIMIT :slots
+        """),
+        {"slots": pb_slots, "mode": mode},
+    ).fetchall() if pb_slots > 0 else []
+
+    rows = list(mv_rows) + list(pb_rows)
 
     if not rows:
         logger.info("Monday open: no PENDING picks for mode=%s.", mode)
@@ -349,9 +425,10 @@ def check_post_close(db: Session):
 
     for sym in closed:
         close_reason, entry_price, close_price = _infer_close_reason(db, sym, mode)
+        closed_stype = _get_symbol_screener_type(db, sym, mode)
         logger.info(
-            "Post-close [%s]: %s closed via %s (entry=$%s close=$%s)",
-            mode, sym, close_reason,
+            "Post-close [%s]: %s (%s) closed via %s (entry=$%s close=$%s)",
+            mode, sym, closed_stype, close_reason,
             f"{entry_price:.2f}" if entry_price else "?",
             f"{close_price:.2f}" if close_price else "?",
         )
@@ -364,6 +441,7 @@ def check_post_close(db: Session):
                 db=db,
                 mode=mode,
                 closed_symbol=sym,
+                closed_stype=closed_stype,
                 close_reason=close_reason,
                 entry_price=entry_price,
                 close_price=close_price,
@@ -380,14 +458,24 @@ def _refill_slot(
     db: Session,
     mode: str,
     closed_symbol: str,
+    closed_stype: str,
     close_reason: str,
     entry_price: float | None,
     close_price: float | None,
     current_positions: set,
     max_pos: int,
 ):
-    """Run slot-refill analysis and execute the recommended pick if approved."""
+    """
+    Run slot-refill analysis and execute the recommended pick if approved.
+    Respects per-strategy slot allocation:
+      - Tries to refill same type as the closed position first (mv→mv, pb→pb)
+      - Falls back to any available type if no same-type picks remain
+    """
     from .claude_analyst import analyze_slot_refill, log_analysis
+
+    mv_max = int(get_setting(db, "mv_max_slots", "3") or "3")
+    pb_max = int(get_setting(db, "pb_max_slots", "2") or "2")
+    mv_held, pb_held = _count_positions_by_type(db, mode, current_positions)
 
     try:
         acct         = alp.get_account(mode)
@@ -399,6 +487,29 @@ def _refill_slot(
         return
 
     held_tuple = tuple(current_positions) if current_positions else ("__none__",)
+
+    # Determine which type(s) have open slots
+    mv_available = mv_held < mv_max
+    pb_available = pb_held < pb_max
+
+    # Build type filter: prefer same type as what closed, fall back if needed
+    if closed_stype in ("minervini", "both") and mv_available:
+        type_filter = ("minervini", "both")
+    elif closed_stype == "pullback" and pb_available:
+        type_filter = ("pullback",)
+    elif mv_available:
+        type_filter = ("minervini", "both")
+        logger.info("Slot refill: no pb slot available — trying mv pick instead")
+    elif pb_available:
+        type_filter = ("pullback",)
+        logger.info("Slot refill: no mv slot available — trying pb pick instead")
+    else:
+        logger.info(
+            "Slot refill [%s]: all strategy slots full (mv=%d/%d pb=%d/%d) — skipping",
+            mode, mv_held, mv_max, pb_held, pb_max,
+        )
+        return
+
     pending_rows = db.execute(
         text("""
             SELECT symbol, score, signal, entry_price, stop_price, target1, rationale, rank,
@@ -410,9 +521,10 @@ def _refill_slot(
               AND mode = :mode
               AND status = 'PENDING'
               AND symbol NOT IN :held
+              AND COALESCE(screener_type, 'minervini') = ANY(:types)
             ORDER BY rank ASC
         """),
-        {"mode": mode, "held": held_tuple},
+        {"mode": mode, "held": held_tuple, "types": list(type_filter)},
     ).fetchall()
 
     pending_picks = [dict(r._mapping) for r in pending_rows]
