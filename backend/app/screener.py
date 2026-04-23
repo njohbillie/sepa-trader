@@ -303,16 +303,6 @@ def run_screener(db: Session, mode: str = None, user_id: int = None) -> list[dic
         else:
             set_setting(db, "watchlist", ",".join(top_symbols))
 
-        tv_user = _s("tv_username", "")
-        tv_pass = _s("tv_password", "")
-        if tv_user and tv_pass:
-            from .tradingview_client import update_weekly_picks
-            tv_result = update_weekly_picks(tv_user, tv_pass, top_symbols)
-            if tv_result["ok"]:
-                logger.info("TradingView weekly_picks %s.", tv_result["action"])
-            else:
-                logger.warning("TradingView sync failed: %s", tv_result["error"])
-
     logger.info(
         "Screener complete. Week of %s. Tier: %s. Plan: %s",
         week_start, tier_label, [r["symbol"] for r in plan_rows],
