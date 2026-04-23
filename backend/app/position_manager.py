@@ -53,6 +53,7 @@ def _gate(
     target: float,
     trigger: str,
     mode: str,
+    user_id: int | None = None,
 ) -> bool:
     """Pre-trade AI gate. Returns True if order should proceed. Fails open."""
     try:
@@ -67,6 +68,7 @@ def _gate(
             entry_price=entry, stop_price=stop, target_price=target,
             trigger=trigger, portfolio_value=portfolio,
             cash=cash, buying_power=buying_power, mode=mode,
+            user_id=user_id,
         )
         log_pre_trade(
             db, symbol, trigger,
@@ -830,6 +832,22 @@ def fill_open_slots(
         mode, len(rows), mv_slots, pb_slots, total_held, max_pos,
     )
 
+    # Build cooldown set: symbols sold within the last 8 hours — never re-enter same day
+    try:
+        sold_recently = {
+            row[0] for row in db.execute(
+                text("""
+                    SELECT DISTINCT symbol FROM trade_log
+                    WHERE action = 'SELL'
+                      AND mode  = :mode
+                      AND created_at >= NOW() - INTERVAL '8 hours'
+                """),
+                {"mode": mode},
+            ).fetchall()
+        }
+    except Exception:
+        sold_recently = set()
+
     from .sepa_analyzer import analyze
 
     for row in rows:
@@ -838,6 +856,11 @@ def fill_open_slots(
         stop   = float(row[2] or 0)
         target = float(row[3] or 0)
         stype  = row[4]
+
+        # Skip symbols that were just sold — don't re-enter same day
+        if sym in sold_recently:
+            logger.info("fill_open_slots: %s sold within last 8h — skipping re-entry.", sym)
+            continue
 
         # Check slot availability for this pick's strategy type
         if stype in ("minervini", "both"):
@@ -864,7 +887,7 @@ def fill_open_slots(
             logger.info("fill_open_slots: %s qty<1 (price=$%.2f stop=$%.2f) — skipping.", sym, price, stop)
             continue
 
-        if not _gate(db, sym, qty, price, stop, target, f"FILL_{signal}", mode):
+        if not _gate(db, sym, qty, price, stop, target, f"FILL_{signal}", mode, user_id=user_id):
             logger.info("fill_open_slots: %s blocked by pre-trade gate.", sym)
             continue
 
