@@ -364,8 +364,9 @@ def _get_portfolio_value(db: Session, mode: str, user_id: int = None) -> float:
         return float(acct.portfolio_value)
     except Exception as exc:
         logger.error(
-            "_get_portfolio_value: Alpaca call failed (mode=%s, user_id=%s): %s",
+            "_get_portfolio_value: Alpaca call failed (mode=%s, user_id=%s): %r",
             mode, user_id, exc,
+            exc_info=True,
         )
         return 0.0
 

@@ -22,22 +22,28 @@ def get_client(mode: str = "paper") -> TradingClient:
     if mode not in _clients:
         if mode == "paper":
             _clients[mode] = TradingClient(
-                api_key=settings.alpaca_paper_key,
-                secret_key=settings.alpaca_paper_secret,
+                api_key=(settings.alpaca_paper_key or "").strip(),
+                secret_key=(settings.alpaca_paper_secret or "").strip(),
                 paper=True,
             )
         else:
             _clients[mode] = TradingClient(
-                api_key=settings.alpaca_live_key,
-                secret_key=settings.alpaca_live_secret,
+                api_key=(settings.alpaca_live_key or "").strip(),
+                secret_key=(settings.alpaca_live_secret or "").strip(),
                 paper=False,
             )
     return _clients[mode]
 
 
 def get_client_for_keys(api_key: str, secret_key: str, paper: bool) -> TradingClient:
-    """Create a TradingClient from explicit credentials (per-user API requests)."""
-    return TradingClient(api_key=api_key, secret_key=secret_key, paper=paper)
+    """Create a TradingClient from explicit credentials (per-user API requests).
+    Strips surrounding whitespace so copy-paste artefacts don't cause 401s.
+    """
+    return TradingClient(
+        api_key=api_key.strip(),
+        secret_key=secret_key.strip(),
+        paper=paper,
+    )
 
 
 def get_account(mode: str = "paper"):
