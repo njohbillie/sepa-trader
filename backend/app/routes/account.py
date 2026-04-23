@@ -48,7 +48,13 @@ def _fetch_account_data(client, name: str, mode: str) -> dict | None:
         last_eq = _sf(acct.last_equity, 0.0)
         day_pnl = equity - last_eq
 
-        unrealized_pl = _sf(getattr(acct, "unrealized_pl", None), 0.0)
+        # unrealized_pl lives on individual Position objects, not on the Account.
+        # Sum it across all open positions for the true total unrealized P&L.
+        try:
+            positions     = client.get_all_positions()
+            unrealized_pl = sum(_sf(getattr(p, "unrealized_pl", None), 0.0) for p in positions)
+        except Exception:
+            unrealized_pl = 0.0
 
         non_marginable_bp = _sf(
             getattr(acct, "non_marginable_buying_power", None),
