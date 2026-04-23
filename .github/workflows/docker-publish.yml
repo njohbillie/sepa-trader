@@ -44,39 +44,3 @@ jobs:
           push: true
           tags: njohbillie/sepa-trader-frontend:v${{ github.run_number }}
 
-  deploy:
-    name: Deploy to Synology — v${{ github.run_number }}
-    runs-on: ubuntu-latest
-    needs: [build-backend, build-frontend]
-    steps:
-      - name: SSH deploy
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host:     ${{ secrets.SYNOLOGY_HOST }}
-          username: ${{ secrets.SYNOLOGY_USER }}
-          key:      ${{ secrets.SYNOLOGY_SSH_KEY }}
-          port:     ${{ secrets.SYNOLOGY_PORT }}
-          script: |
-            set -e
-            cd ${{ secrets.SYNOLOGY_PROJECT_PATH }}
-
-            echo "==> Updating IMAGE_TAG to v${{ github.run_number }}"
-            sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=v${{ github.run_number }}/" .env
-
-            echo "==> Pulling new images from Docker Hub"
-            docker compose pull
-
-            echo "==> Stopping app containers only (db + redis stay running)"
-            docker compose stop backend frontend
-
-            echo "==> Removing old app containers"
-            docker compose rm -f backend frontend
-
-            echo "==> Pruning dangling images"
-            docker image prune -f
-
-            echo "==> Recreating app containers from new images"
-            docker compose up -d backend frontend
-
-            echo "==> Done. Running containers:"
-            docker compose ps
