@@ -348,12 +348,20 @@ def _get_portfolio_value(db: Session, mode: str, user_id: int = None) -> float:
             if key and secret:
                 client = alp.get_client_for_keys(key, secret, paper)
                 return float(client.get_account().portfolio_value)
+            else:
+                logger.error(
+                    "_get_portfolio_value: no Alpaca %s credentials found for user_id=%s "
+                    "(is_admin=%s) — configure alpaca_%s_key/secret in Settings",
+                    mode, user_id, is_admin, mode,
+                )
+                return 0.0
 
         acct = alp.get_account(mode)
         return float(acct.portfolio_value)
-    except Exception:
-        logger.warning(
-            "_get_portfolio_value: could not reach Alpaca — screener aborted to avoid mis-sized positions"
+    except Exception as exc:
+        logger.error(
+            "_get_portfolio_value: Alpaca call failed (mode=%s, user_id=%s): %s",
+            mode, user_id, exc,
         )
         return 0.0
 
