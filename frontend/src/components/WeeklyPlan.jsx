@@ -3,8 +3,8 @@ import { useQuery, useQueryClient } from 'react-query'
 import {
   fetchWeeklyPlan, fetchWeeklyDD, forceRefreshDD, fetchScreenerStatus,
   runScreener, runMinerviniScreener, runPullbackScreener,
-  syncTradingView, updatePlanStatus,
-  fetchAnalyses, runAnalysis,
+  exportWatchlist, updatePlanStatus,
+  fetchAnalyses, runAnalysis, fetchSettings,
 } from '../api/client'
 import TapeCheck from './TapeCheck'
 
@@ -76,6 +76,9 @@ export default function WeeklyPlan() {
     { staleTime: 60000, refetchOnWindowFocus: false },
   )
 
+  const { data: settings = {} } = useQuery('settings', fetchSettings, { staleTime: 300000 })
+  const tvLayoutId = settings.tv_chart_layout_id || ''
+
   const weekStart = plan[0]?.week_start
   const {
     data: ddList = [],
@@ -144,16 +147,25 @@ export default function WeeklyPlan() {
     }
   }
 
-  async function handleSyncTV() {
+  async function handleExportWatchlist() {
     setSyncing(true)
     setMsg(null)
     try {
-      const res = await syncTradingView()
-      setMsg(res.message || 'Syncing to TradingView…')
+      const blob = await exportWatchlist()
+      // Trigger browser download
+      const url = window.URL.createObjectURL(blob)
+      const a   = document.createElement('a')
+      a.href     = url
+      a.download = 'weekly_picks.txt'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      window.URL.revokeObjectURL(url)
+      setMsg('weekly_picks.txt downloaded. In TradingView: Watchlists → ⋮ → Import list from file.')
       setMsgType('info')
-      setTimeout(() => setMsg(null), 8000)
+      setTimeout(() => setMsg(null), 12000)
     } catch (err) {
-      setMsg(err?.response?.data?.detail || 'TV sync failed — add credentials in Settings.')
+      setMsg(err?.response?.data?.detail || 'Export failed — run the screener first.')
       setMsgType('error')
     } finally {
       setSyncing(false)
@@ -219,12 +231,12 @@ export default function WeeklyPlan() {
             {analyzing ? 'Analyzing…' : 'AI Analysis'}
           </button>
           <button
-            onClick={handleSyncTV}
+            onClick={handleExportWatchlist}
             disabled={syncing || plan.length === 0}
             className="px-3 py-1.5 rounded-lg text-sm font-medium bg-slate-700 hover:bg-slate-600 text-slate-200 disabled:opacity-40 transition-colors"
-            title="Push to TradingView weekly_picks"
+            title="Download weekly_picks.txt — import in TradingView: Watchlists → ⋮ → Import list from file"
           >
-            {syncing ? 'Syncing…' : 'Sync TV'}
+            {syncing ? 'Exporting…' : '↓ TV Watchlist'}
           </button>
 
           {/* Dropdown-style split run button */}
@@ -326,6 +338,7 @@ export default function WeeklyPlan() {
               dd={ddMap[row.symbol]}
               ddLoading={ddLoading}
               onStatusChange={handleStatus}
+              tvLayoutId={tvLayoutId}
             />
           ))}
         </div>
@@ -374,9 +387,13 @@ const AI_DECISION_META = {
   SKIP:    { label: 'Skip',    cls: 'bg-red-500/20     text-red-300     border border-red-500/30'     },
 }
 
-function PlanCard({ row, dd, ddLoading, onStatusChange }) {
+function PlanCard({ row, dd, ddLoading, onStatusChange, tvLayoutId }) {
   const [expanded, setExpanded] = useState(false)
   const [ddOpen, setDdOpen]     = useState(false)
+
+  const tvUrl = tvLayoutId
+    ? `https://www.tradingview.com/chart/${tvLayoutId}/?symbol=${row.symbol}`
+    : `https://www.tradingview.com/chart/?symbol=${row.symbol}`
 
   const signalCls = SIGNAL_STYLE[row.signal] || SIGNAL_STYLE.STAGE2_WATCH
   const statusCls = STATUS_STYLE[row.status] || STATUS_STYLE.PENDING
@@ -420,6 +437,16 @@ function PlanCard({ row, dd, ddLoading, onStatusChange }) {
             <span>R:R <strong className="text-emerald-400">{rr}x</strong></span>
           </div>
         </div>
+        <a
+          href={tvUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={e => e.stopPropagation()}
+          className="flex-shrink-0 text-xs px-2 py-1 rounded-md bg-sky-500/15 text-sky-400 border border-sky-500/20 hover:bg-sky-500/25 transition-colors whitespace-nowrap"
+          title="Open chart in TradingView"
+        >
+          📊 Chart
+        </a>
         <div className="text-right flex-shrink-0 space-y-1">
           <div className="text-sm font-medium text-slate-200">{row.position_size} sh</div>
           <span className={`text-xs px-2 py-0.5 rounded-full ${statusCls}`}>{row.status}</span>

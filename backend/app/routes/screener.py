@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, BackgroundTasks
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from ..database import get_db, SessionLocal, get_setting, set_setting, get_current_user, get_user_setting, set_user_setting
+from ..database import get_db, SessionLocal, get_setting, set_setting, get_current_user, get_user_setting, set_user_setting, get_all_user_settings
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/screener", tags=["screener"])
@@ -202,7 +202,8 @@ def trigger_screener(
 ):
     """Start BOTH screeners (Minervini + Pullback) in background."""
     uid  = current_user["id"]
-    mode = get_user_setting(db, "trading_mode", "paper", uid)
+    mode = get_all_user_settings(db, uid).get("trading_mode", "paper")
+    log.info("Screener /run triggered: uid=%s mode=%s (from merged settings)", uid, mode)
     set_user_setting(db, "screener_status",     "running",            uid)
     set_user_setting(db, "screener_error",      "",                   uid)
     set_user_setting(db, "screener_phase",      "Starting…",          uid)
@@ -218,7 +219,7 @@ def trigger_screener(
 
             from ..screener import run_both_screeners
             _phase("Fetching TradingView data…")
-            results = run_both_screeners(db2, user_id=uid, _phase_cb=_phase)
+            results = run_both_screeners(db2, mode=mode, user_id=uid, _phase_cb=_phase)
             set_user_setting(db2, "screener_status", "done",                         uid)
             set_user_setting(db2, "screener_phase",  f"Done — {len(results)} stocks selected", uid)
             set_user_setting(db2, "screener_count",  str(len(results)),               uid)
@@ -249,7 +250,8 @@ def trigger_minervini_screener(
 ):
     """Run only the Minervini (SEPA) screener in background."""
     uid  = current_user["id"]
-    mode = get_user_setting(db, "trading_mode", "paper", uid)
+    mode = get_all_user_settings(db, uid).get("trading_mode", "paper")
+    log.info("Screener /run-minervini triggered: uid=%s mode=%s (from merged settings)", uid, mode)
     set_user_setting(db, "screener_status",     "running",        uid)
     set_user_setting(db, "screener_error",      "",               uid)
     set_user_setting(db, "screener_phase",      "Starting…",      uid)
@@ -265,7 +267,7 @@ def trigger_minervini_screener(
 
             from ..screener import run_screener
             _phase("Minervini: fetching TradingView data…")
-            results = run_screener(db2, user_id=uid)
+            results = run_screener(db2, mode=mode, user_id=uid)
             set_user_setting(db2, "screener_status", "done",                         uid)
             set_user_setting(db2, "screener_phase",  f"Done — {len(results)} stocks selected", uid)
             set_user_setting(db2, "screener_count",  str(len(results)),               uid)
@@ -296,7 +298,8 @@ def trigger_pullback_screener(
 ):
     """Run only the Pullback-to-MA screener in background."""
     uid  = current_user["id"]
-    mode = get_user_setting(db, "trading_mode", "paper", uid)
+    mode = get_all_user_settings(db, uid).get("trading_mode", "paper")
+    log.info("Screener /run-pullback triggered: uid=%s mode=%s (from merged settings)", uid, mode)
     set_user_setting(db, "screener_status",     "running",        uid)
     set_user_setting(db, "screener_error",      "",               uid)
     set_user_setting(db, "screener_phase",      "Starting…",      uid)
@@ -402,26 +405,34 @@ def list_tv_screeners(
     tv_pass  = get_user_setting(db, "tv_password", "", uid)
 
     if not tv_user or not tv_pass:
-        raise HTTPException(400, "TradingView credentials not configured in Settings → Integrations.")
+        return {
+            "screeners": [],
+            "count": 0,
+            "message": "TradingView credentials not configured — add them in Settings → Integrations.",
+        }
 
     screeners = list_saved_screeners(tv_user, tv_pass)
     return {"screeners": screeners, "count": len(screeners)}
 
 
-@router.post("/sync-tradingview")
-def sync_tradingview(
-    background_tasks: BackgroundTasks,
+@router.get("/watchlist-export")
+def watchlist_export(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    uid     = current_user["id"]
-    tv_user = get_user_setting(db, "tv_username", "", uid)
-    tv_pass = get_user_setting(db, "tv_password", "", uid)
-    if not tv_user or not tv_pass:
-        from fastapi import HTTPException
-        raise HTTPException(400, "TradingView credentials not configured in Settings.")
+    """
+    Return the current weekly plan as a plain-text watchlist file that
+    TradingView can import directly.
 
+    Import in TradingView:
+      Watchlists panel → ⋮ (three dots) → Import list from file → select the .txt
+    """
+    from fastapi import HTTPException
+    from fastapi.responses import Response
+
+    uid  = current_user["id"]
     mode = get_user_setting(db, "trading_mode", "paper", uid)
+
     rows = db.execute(
         text("""
             SELECT symbol FROM weekly_plan
@@ -433,22 +444,65 @@ def sync_tradingview(
         """),
         {"mode": mode, "uid": uid},
     ).fetchall()
-    symbols = [r[0] for r in rows]
-    if not symbols:
-        from fastapi import HTTPException
-        raise HTTPException(404, "No weekly plan found for current mode. Run the screener first.")
 
-    def _sync():
-        from ..tradingview_client import update_weekly_picks
-        result = update_weekly_picks(tv_user, tv_pass, symbols)
-        if result["ok"]:
-            log.info("TV sync: weekly_picks %s (%d symbols).", result["action"], result["count"])
-        else:
-            log.error("TV sync failed: %s", result["error"])
+    if not rows:
+        raise HTTPException(404, "No weekly plan found — run the screener first.")
 
-    background_tasks.add_task(_sync)
-    return {"status": "sync_started", "symbols": symbols, "mode": mode,
-            "message": f"Syncing {len(symbols)} symbols to TradingView weekly_picks."}
+    from ..tradingview_client import to_tv_symbol
+    symbols  = [r[0] for r in rows]
+    tv_lines = "\n".join(to_tv_symbol(s) for s in symbols)
+
+    return Response(
+        content=tv_lines,
+        media_type="text/plain",
+        headers={"Content-Disposition": 'attachment; filename="weekly_picks.txt"'},
+    )
+
+
+@router.post("/sync-tradingview")
+def sync_tradingview(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Legacy endpoint — kept so existing frontend calls don't 404.
+    Returns the symbol list and import instructions.
+    TV's watchlist REST API was removed in 2024; use /watchlist-export instead.
+    """
+    from fastapi import HTTPException
+
+    uid  = current_user["id"]
+    mode = get_user_setting(db, "trading_mode", "paper", uid)
+
+    rows = db.execute(
+        text("""
+            SELECT symbol FROM weekly_plan
+            WHERE week_start = (
+                SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode AND user_id = :uid
+            )
+              AND mode = :mode AND user_id = :uid
+            ORDER BY rank ASC
+        """),
+        {"mode": mode, "uid": uid},
+    ).fetchall()
+
+    if not rows:
+        raise HTTPException(404, "No weekly plan found — run the screener first.")
+
+    from ..tradingview_client import to_tv_symbol
+    symbols    = [r[0] for r in rows]
+    tv_symbols = [to_tv_symbol(s) for s in symbols]
+
+    return {
+        "status":     "ready",
+        "symbols":    tv_symbols,
+        "mode":       mode,
+        "message":    (
+            f"{len(symbols)} symbols ready. "
+            "Click 'Download .txt' to save the watchlist file, then import it in "
+            "TradingView: Watchlists → ⋮ → Import list from file."
+        ),
+    }
 
 
 @router.get("/analysis")

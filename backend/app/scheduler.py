@@ -124,6 +124,80 @@ async def _screener_watchdog():
         db2.close()
 
 
+async def _pb_screener_watchdog():
+    """
+    Runs every minute. Fires the Pullback screener when all conditions are met:
+      1. pb_screener_auto_run == "true"
+      2. current ET weekday is in pb_screener_schedule_days (comma-separated 0–6)
+      3. current ET HH:MM is in pb_screener_schedule_times (comma-separated)
+    Tracks last run per slot (YYYY-MM-DD HH:MM) to prevent double-firing.
+    """
+    db = SessionLocal()
+    try:
+        if get_setting(db, "pb_screener_auto_run", "true") != "true":
+            return
+
+        now_et = datetime.now(_ET)
+
+        days_raw = get_setting(db, "pb_screener_schedule_days", "").strip()
+        if days_raw:
+            try:
+                schedule_days = {int(d.strip()) for d in days_raw.split(",") if d.strip().isdigit()}
+            except ValueError:
+                schedule_days = set()
+        else:
+            return  # no schedule configured — skip
+
+        if now_et.weekday() not in schedule_days:
+            return
+
+        times_raw = get_setting(db, "pb_screener_schedule_times", "").strip()
+        if not times_raw:
+            return  # no times configured — skip
+
+        schedule_times = {t.strip() for t in times_raw.split(",") if t.strip()}
+        current_hm = now_et.strftime("%H:%M")
+        if current_hm not in schedule_times:
+            return
+
+        run_key = now_et.strftime("%Y-%m-%d %H:%M")
+        if get_setting(db, "pb_screener_last_auto_run", "") == run_key:
+            return
+
+        set_setting(db, "pb_screener_last_auto_run", run_key)
+        set_setting(db, "screener_status", "running")
+        set_setting(db, "screener_error",  "")
+        db.commit()
+
+    finally:
+        db.close()
+
+    db2 = SessionLocal()
+    try:
+        from .pullback_screener import run_pullback_screener
+        from sqlalchemy import text as _text
+        admin_row = db2.execute(
+            _text("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")
+        ).fetchone()
+        admin_id = admin_row[0] if admin_row else None
+
+        logger.info("Scheduled pullback screener starting (%s ET)…", run_key)
+        plan = run_pullback_screener(db2, user_id=admin_id)
+        set_setting(db2, "screener_status", "done")
+        set_setting(db2, "screener_count",  str(len(plan)))
+        logger.info("Scheduled pullback screener done. %d stocks selected.", len(plan))
+    except Exception as exc:
+        logger.error("Scheduled pullback screener failed: %s", exc)
+        db3 = SessionLocal()
+        try:
+            set_setting(db3, "screener_status", "error")
+            set_setting(db3, "screener_error",  str(exc)[:500])
+        finally:
+            db3.close()
+    finally:
+        db2.close()
+
+
 async def _market_close_screener():
     """
     Fires Mon–Fri at 4:05 PM ET — runs both screeners (Minervini + Pullback)
@@ -369,12 +443,21 @@ def start_scheduler():
         replace_existing=True,
     )
 
-    # Watchdog checks every minute whether it's time to run the screener
-    # (kept for manual schedule overrides via screener_schedule_day/time settings)
+    # Watchdog checks every minute whether it's time to run the Minervini screener
+    # (uses screener_schedule_days/times settings)
     scheduler.add_job(
         _screener_watchdog,
         CronTrigger(minute="*"),
         id="screener_watchdog",
+        replace_existing=True,
+    )
+
+    # Watchdog checks every minute whether it's time to run the Pullback screener
+    # (uses pb_screener_schedule_days/times settings)
+    scheduler.add_job(
+        _pb_screener_watchdog,
+        CronTrigger(minute="*"),
+        id="pb_screener_watchdog",
         replace_existing=True,
     )
 

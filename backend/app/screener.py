@@ -76,7 +76,7 @@ def _generate_rationale(symbol: str, result: dict) -> str:
     return " ".join(parts)
 
 
-def run_screener(db: Session, mode: str = None, user_id: int = None) -> list[dict]:
+def run_screener(db: Session, mode: str = None, user_id: int = None, account_value: float = None) -> list[dict]:
     """
     Scan the stock universe, select top-N SEPA candidates, save to
     weekly_plan table, and update the watchlist setting.
@@ -85,6 +85,9 @@ def run_screener(db: Session, mode: str = None, user_id: int = None) -> list[dic
     Paper accounts use settings as configured — no overrides.
     Live accounts apply graduated limits from get_live_account_limits()
     which automatically unlock as the account grows across tier boundaries.
+
+    account_value: pass explicitly when calling from run_both_screeners to
+    avoid a second Alpaca API call (the value was already fetched).
     """
     def _s(key, default=""):
         return get_user_setting(db, key, default, user_id)
@@ -114,7 +117,8 @@ def run_screener(db: Session, mode: str = None, user_id: int = None) -> list[dic
     ema20_pct       = float(_s("screener_ema20_pct",     "2.0") or "2.0")
     ema50_pct       = float(_s("screener_ema50_pct",     "3.0") or "3.0")
 
-    account_value = _get_portfolio_value(db, mode, user_id)
+    if account_value is None:
+        account_value = _get_portfolio_value(db, mode, user_id)
     if account_value <= 0:
         msg = "Screener aborted: could not fetch account value from Alpaca — no positions sized"
         _log_alert(db, "ERROR", msg)
@@ -303,16 +307,6 @@ def run_screener(db: Session, mode: str = None, user_id: int = None) -> list[dic
         else:
             set_setting(db, "watchlist", ",".join(top_symbols))
 
-        tv_user = _s("tv_username", "")
-        tv_pass = _s("tv_password", "")
-        if tv_user and tv_pass:
-            from .tradingview_client import update_weekly_picks
-            tv_result = update_weekly_picks(tv_user, tv_pass, top_symbols)
-            if tv_result["ok"]:
-                logger.info("TradingView weekly_picks %s.", tv_result["action"])
-            else:
-                logger.warning("TradingView sync failed: %s", tv_result["error"])
-
     logger.info(
         "Screener complete. Week of %s. Tier: %s. Plan: %s",
         week_start, tier_label, [r["symbol"] for r in plan_rows],
@@ -358,12 +352,21 @@ def _get_portfolio_value(db: Session, mode: str, user_id: int = None) -> float:
             if key and secret:
                 client = alp.get_client_for_keys(key, secret, paper)
                 return float(client.get_account().portfolio_value)
+            else:
+                logger.error(
+                    "_get_portfolio_value: no Alpaca %s credentials found for user_id=%s "
+                    "(is_admin=%s) — configure alpaca_%s_key/secret in Settings",
+                    mode, user_id, is_admin, mode,
+                )
+                return 0.0
 
         acct = alp.get_account(mode)
         return float(acct.portfolio_value)
-    except Exception:
-        logger.warning(
-            "_get_portfolio_value: could not reach Alpaca — screener aborted to avoid mis-sized positions"
+    except Exception as exc:
+        logger.error(
+            "_get_portfolio_value: Alpaca call failed (mode=%s, user_id=%s): %r",
+            mode, user_id, exc,
+            exc_info=True,
         )
         return 0.0
 
@@ -421,10 +424,33 @@ def run_both_screeners(
 
     logger.info("Running both screeners (mode=%s, user=%s)…", mode, user_id)
 
+    # Fetch account value once — shared by both screeners to avoid double Alpaca calls
+    # Log which credentials are being resolved so auth failures are diagnosable
+    from .database import get_user_setting as _gus2
+    from .config import settings as _gs2
+    _live_key   = _gus2(db, "alpaca_live_key",    "", user_id) or _gs2.alpaca_live_key
+    _paper_key  = _gus2(db, "alpaca_paper_key",   "", user_id) or _gs2.alpaca_paper_key
+    _live_sec   = _gus2(db, "alpaca_live_secret",  "", user_id) or _gs2.alpaca_live_secret
+    logger.error(
+        "DIAG — mode=%s user_id=%s  live_key=%s live_secret_len=%d  paper_key=%s",
+        mode, user_id,
+        (_live_key[:8]  + "…") if _live_key  else "MISSING",
+        len(_live_sec)  if _live_sec  else 0,
+        (_paper_key[:8] + "…") if _paper_key else "MISSING",
+    )
+
+    av = _get_portfolio_value(db, mode, user_id)
+    if av <= 0:
+        raise RuntimeError(
+            f"Cannot reach Alpaca ({mode} mode) — check credentials in Settings → Alpaca. "
+            "Both screeners aborted."
+        )
+    logger.info("Account value for screener run: $%.0f (mode=%s)", av, mode)
+
     _phase("Minervini: scanning universe via TradingView…")
-    min_rows = run_screener(db, mode=mode, user_id=user_id)   # saves its own plan
+    min_rows = run_screener(db, mode=mode, user_id=user_id, account_value=av)
     _phase(f"Minervini done — {len(min_rows)} candidates. Running Pullback screener…")
-    pb_rows  = run_pullback_screener(db, mode=mode, user_id=user_id)
+    pb_rows  = run_pullback_screener(db, mode=mode, user_id=user_id, account_value=av)
     _phase(f"Pullback done — {len(pb_rows)} candidates. Merging results…")
 
     # Merge: Minervini first, then Pullback, dedup by symbol

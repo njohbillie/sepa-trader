@@ -4,6 +4,7 @@ import { fetchSettings, updateSetting, fetchMe, fetchTvScreeners } from '../api/
 import TwoFactorSetup from './TwoFactorSetup'
 
 const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+const EXCHANGES = ['NYSE', 'NASDAQ', 'AMEX', 'CBOE', 'OTC']
 
 const SECTIONS = [
   {
@@ -27,6 +28,7 @@ const SECTIONS = [
     title: 'Pullback Screener (PPST + EMA)',
     fields: [
       { key: 'pb_tv_screener_name',  label: 'TradingView Screener name (leave blank to use app filters below)', type: 'tv_screener', span: true },
+      { key: 'pb_exchanges', label: 'Exchanges to scan', type: 'exchange_picker', span: true, defaultValue: 'NYSE,NASDAQ' },
       { key: 'pb_price_min',         label: 'Min price $ (default 10)',             type: 'number' },
       { key: 'pb_price_max',         label: 'Max price $ (default 200)',            type: 'number' },
       { key: 'pb_rsi_min',           label: 'RSI min (reset zone, default 40)',     type: 'number' },
@@ -37,12 +39,20 @@ const SECTIONS = [
       { key: 'pb_week_change_min',   label: '1-week change min % (default -3)',     type: 'number' },
       { key: 'pb_ema50_proximity',   label: 'Max % from EMA50 (default 8)',         type: 'number' },
       { key: 'pb_beta_max',          label: 'Max beta (default 2.5)',               type: 'number' },
-      { key: 'pb_earnings_days_min', label: 'Min days to earnings (default 15)',    type: 'number' },
-      { key: 'pb_top_n',             label: 'Top N from pullback screener (default 5)', type: 'number' },
+      { key: 'pb_earnings_days_min',       label: 'Min days to earnings (default 15)',                          type: 'number' },
+      { key: 'pb_ema_spread_min',   label: 'Min EMA20/50 spread % — rejects flat EMA structures (default 1)', type: 'number' },
+      { key: 'pb_adx_min',          label: 'Min ADX — trend strength gate (default 20, 0 = off)',              type: 'number' },
+      { key: 'pb_52w_high_pct_max', label: 'Max % below 52-week high — Stage 2 guard (default 30)',            type: 'number' },
+      { key: 'pb_3m_perf_min',      label: 'Min 3-month performance % (default -5, e.g. -10 = lenient)',       type: 'number' },
+      { key: 'pb_block_unknown_earnings', label: 'Block stocks with unknown earnings date (recommended)',        type: 'toggle', defaultValue: 'true' },
+      { key: 'pb_top_n',                  label: 'Top N from pullback screener (default 5)',                    type: 'number' },
       { key: 'pb_price_above_ema20',   label: 'Require price > EMA20',    type: 'toggle', defaultValue: 'true' },
       { key: 'pb_ema20_above_ema50',   label: 'Require EMA20 > EMA50',    type: 'toggle', defaultValue: 'true' },
       { key: 'pb_ema50_above_ema100',  label: 'Require EMA50 > EMA100',   type: 'toggle', defaultValue: 'true' },
       { key: 'pb_ema100_above_ema200', label: 'Require EMA100 > EMA200',  type: 'toggle', defaultValue: 'true' },
+      { key: 'pb_ai_chart_review',    label: 'AI chart review — analyse price action per candidate before finalising (requires AI key)', type: 'toggle', defaultValue: 'false' },
+      { key: 'pb_ai_chart_min_grade', label: 'Minimum AI chart grade to pass (A = strict, B = default, C = lenient)',
+        type: 'select', options: [{ value: 'A', label: 'A — Pristine setups only' }, { value: 'B', label: 'B — Solid setups (recommended)' }, { value: 'C', label: 'C — Allow marginal setups' }] },
       { key: 'pb_ppst_required',       label: 'Require PPST bullish confirmation', type: 'toggle', defaultValue: 'true' },
       { key: 'pb_ppst_pivot_period',   label: 'PPST — Pivot Point Period (TV default 2)',  type: 'number' },
       { key: 'pb_ppst_multiplier',     label: 'PPST — ATR Factor (TV default 3)',          type: 'number' },
@@ -66,10 +76,26 @@ const SECTIONS = [
       { key: 'stop_loss_pct',       label: 'Default stop loss %',                                  type: 'number' },
       { key: 'max_position_pct',    label: 'Max position size % (hard cap)',                       type: 'number' },
       { key: 'max_positions',       label: 'Max simultaneous positions',                           type: 'number' },
+      { key: 'mv_entry_order_type', label: 'Minervini entry order type', type: 'select',
+        options: [
+          { value: 'stop_limit', label: 'Stop-limit — activates only when price breaks out (recommended for Minervini)' },
+          { value: 'limit',      label: 'Limit — fills up to entry + slippage%' },
+          { value: 'market',     label: 'Market — immediate fill at any price' },
+        ]
+      },
+      { key: 'mv_entry_slippage_pct', label: 'Minervini slippage tolerance % (default 1.0)', type: 'number' },
+      { key: 'pb_entry_order_type', label: 'Pullback entry order type', type: 'select',
+        options: [
+          { value: 'limit',      label: 'Limit — fills up to entry + slippage% (recommended for pullbacks)' },
+          { value: 'stop_limit', label: 'Stop-limit — activates only when price reaches entry' },
+          { value: 'market',     label: 'Market — immediate fill at any price' },
+        ]
+      },
+      { key: 'pb_entry_slippage_pct', label: 'Pullback slippage tolerance % (default 0.5)', type: 'number' },
     ],
   },
   {
-    title: 'Screener — Schedule (ET)',
+    title: 'Minervini Screener — Schedule (ET)',
     fields: [
       { key: 'screener_auto_run',       label: 'Auto-run enabled',                type: 'toggle',    defaultValue: 'true' },
       { key: 'screener_schedule_days',  label: 'Days to run (click to toggle)',   type: 'day_picker', span: true },
@@ -77,8 +103,17 @@ const SECTIONS = [
     ],
   },
   {
+    title: 'Pullback Screener — Schedule (ET)',
+    fields: [
+      { key: 'pb_screener_auto_run',       label: 'Auto-run enabled',                type: 'toggle',    defaultValue: 'true' },
+      { key: 'pb_screener_schedule_days',  label: 'Days to run (click to toggle)',   type: 'day_picker', span: true },
+      { key: 'pb_screener_schedule_times', label: 'Run times (24h ET, e.g. 20:00)', type: 'time_list',  span: true },
+    ],
+  },
+  {
     title: 'Integrations',
     fields: [
+      { key: 'tv_chart_layout_id', label: 'TradingView chart layout ID (paste from chart URL — optional)', type: 'text', span: true },
       { key: 'tv_username',    label: 'TradingView Username', type: 'text'     },
       { key: 'tv_password',    label: 'TradingView Password', type: 'password' },
       { key: 'watchlist',      label: 'Monitor Watchlist (CSV)',  type: 'text', span: true },
@@ -126,12 +161,18 @@ export default function SettingsPanel() {
     setTvLoading(true); setTvError('')
     try {
       const res = await fetchTvScreeners()
-      setTvList(res.screeners || [])
-      setTvOpen(true)
+      const list = res.screeners || []
+      setTvList(list)
+      if (res.message && list.length === 0) {
+        setTvError(res.message)
+      } else {
+        setTvOpen(true)
+      }
     } catch (e) {
       setTvError(e?.response?.data?.detail || 'Could not fetch screeners — check TradingView credentials in Settings → Integrations.')
     } finally {
-      setTvLoading(false) }
+      setTvLoading(false)
+    }
   }
 
   async function save(key, value) {
@@ -261,6 +302,45 @@ function Field({ field, value, saving, onSave,
         >
           <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${on ? 'left-6' : 'left-1'}`} />
         </button>
+      </div>
+    )
+  }
+
+  if (field.type === 'exchange_picker') {
+    const selected = new Set(
+      (current || field.defaultValue || 'NYSE,NASDAQ')
+        .split(',').map(e => e.trim().toUpperCase()).filter(Boolean)
+    )
+    function toggleExchange(ex) {
+      const next = new Set(selected)
+      if (next.has(ex)) next.delete(ex); else next.add(ex)
+      const val = EXCHANGES.filter(e => next.has(e)).join(',')
+      setLocal(val)
+      onSave(val || 'NYSE,NASDAQ')
+    }
+    return (
+      <div className="bg-surface rounded-lg p-3">
+        <label className="text-xs text-slate-400 block mb-2">{field.label}</label>
+        <div className="flex gap-1.5 flex-wrap">
+          {EXCHANGES.map(ex => (
+            <button
+              key={ex}
+              onClick={() => toggleExchange(ex)}
+              disabled={saving}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors disabled:opacity-50 ${
+                selected.has(ex)
+                  ? 'bg-accent text-white'
+                  : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+              }`}
+            >{ex}</button>
+          ))}
+          {selected.size === 0 && (
+            <span className="text-xs text-amber-400 self-center ml-1">⚠ No exchanges selected — screener will return nothing</span>
+          )}
+        </div>
+        <p className="text-[10px] text-slate-500 mt-1.5">
+          NYSE + NASDAQ covers ~95% of liquid US equities. Add AMEX for small-caps, OTC for pink sheets.
+        </p>
       </div>
     )
   }

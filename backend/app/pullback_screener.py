@@ -14,7 +14,7 @@ All thresholds are configurable via user_settings with the 'pb_' prefix.
 """
 import logging
 import math
-from datetime import date
+from datetime import date, datetime, timezone
 
 import httpx
 import numpy as np
@@ -41,6 +41,11 @@ _PB_COLS = [
     "volume",
     "average_volume_30d_calc",
     "market_cap_basic",
+    "earnings_release_next_date",   # Unix timestamp — skip Yahoo Finance round-trip when present
+    "price_52_week_high",
+    "ADX",
+    "Perf.1M",
+    "Perf.3M",
 ]
 
 _TV_HEADERS = {
@@ -76,11 +81,26 @@ def get_pb_settings(db: Session, user_id: int) -> dict:
         "market_cap_min":      float(_s("pb_market_cap_min",    500_000_000)),
         "ema50_proximity":     float(_s("pb_ema50_proximity",   8.0)),
         "earnings_days_min":   int(  _s("pb_earnings_days_min", 15)),
-        "ppst_required":       _s("pb_ppst_required",     "true") == "true",
-        "ppst_pivot_period":   int(  _s("pb_ppst_pivot_period",  2)),    # TV: Pivot Point Period
-        "ppst_atr_factor":     float(_s("pb_ppst_multiplier",   3.0)),   # TV: ATR Factor
-        "ppst_atr_period":     int(  _s("pb_ppst_period",       10)),    # TV: ATR Period
-        "top_n":               int(  _s("pb_top_n",             5)),
+        "ppst_required":          _s("pb_ppst_required",     "true") == "true",
+        "ppst_pivot_period":      int(  _s("pb_ppst_pivot_period",  2)),    # TV: Pivot Point Period
+        "ppst_atr_factor":        float(_s("pb_ppst_multiplier",   3.0)),   # TV: ATR Factor
+        "ppst_atr_period":        int(  _s("pb_ppst_period",       10)),    # TV: ATR Period
+        # Earnings: block stocks whose next earnings date cannot be determined
+        "block_unknown_earnings": _s("pb_block_unknown_earnings", "true") == "true",
+        "top_n":                  int(  _s("pb_top_n",             5)),
+        # AI chart review — runs per candidate after all quantitative filters
+        "ai_chart_review":       _s("pb_ai_chart_review",      "false") == "true",
+        "ai_chart_min_grade":    _s("pb_ai_chart_min_grade",   "B").strip().upper(),
+        "ema_spread_min":     float(_s("pb_ema_spread_min",     1.0)),   # min % EMA20 > EMA50
+        "adx_min":            float(_s("pb_adx_min",            20.0)),  # min ADX (trend strength)
+        "52w_high_pct_max":   float(_s("pb_52w_high_pct_max",   30.0)),  # max % below 52W high
+        "perf_3m_min":        float(_s("pb_3m_perf_min",        -5.0)),  # min 3-month performance %
+        # Exchange filter — comma-separated list, e.g. "NYSE,NASDAQ"
+        "exchanges": [
+            e.strip().upper()
+            for e in _s("pb_exchanges", "NYSE,NASDAQ").split(",")
+            if e.strip()
+        ],
     }
 
 
@@ -90,6 +110,7 @@ def run_pullback_screener(
     db: Session,
     mode: str = None,
     user_id: int = None,
+    account_value: float = None,
 ) -> list[dict]:
     """
     Run the Pullback-to-MA screener.
@@ -141,8 +162,8 @@ def run_pullback_screener(
         logger.info("Pullback screener: no candidates passed TV filter")
         return []
 
-    # ── Pass 2: PPST + earnings (per-candidate) ───────────────────────────────
-    scored = _score_candidates(candidates, cfg)
+    # ── Pass 2: PPST + earnings + optional AI chart review ───────────────────
+    scored = _score_candidates(candidates, cfg, db=db, user_id=user_id)
     logger.info("Pullback screener: %d candidates after PPST/earnings check", len(scored))
 
     if not scored:
@@ -158,7 +179,8 @@ def run_pullback_screener(
     # ── Position sizing ───────────────────────────────────────────────────────
     from .screener import _get_portfolio_value, _next_monday
 
-    account_value = _get_portfolio_value(db, mode, user_id)
+    if account_value is None:
+        account_value = _get_portfolio_value(db, mode, user_id)
     if account_value <= 0:
         logger.warning("Pullback screener: cannot fetch account value — skipping")
         return []
@@ -193,11 +215,18 @@ def run_pullback_screener(
         parts = [
             f"Pullback screener. RSI {c['rsi']:.0f} (reset zone).",
             f"{'PPST bullish. ' if c['ppst_bullish'] else 'PPST not confirmed. '}",
-            f"Price {c['ema50_pct']:.1f}% from EMA50.",
+            f"Price {c['ema50_pct']:.1f}% from EMA50. EMA spread {c['ema_spread']:.1f}%.",
+            f"ADX {c['adx']:.0f}. Perf 1M: {c['perf_1m']:+.1f}%, 3M: {c['perf_3m']:+.1f}%.",
+            f"{abs(c['pct_from_52wh']):.1f}% below 52W high.",
             f"EMA: {ema_ladder}.",
         ]
         if c.get("days_to_earnings") is not None:
             parts.append(f"Earnings ≥{c['days_to_earnings']}d away.")
+        if c.get("ai_chart_grade"):
+            parts.append(
+                f"AI chart grade: {c['ai_chart_grade']}."
+                + (f" {c['ai_chart_reason']}" if c.get("ai_chart_reason") else "")
+            )
         rationale = " ".join(p.strip() for p in parts)
 
         signal = "PULLBACK_EMA50" if c["ema50_pct"] <= 5.0 else "PULLBACK_EMA20"
@@ -218,6 +247,7 @@ def run_pullback_screener(
             "status":        "PENDING",
             "mode":          mode,
             "screener_type": "pullback",
+            "tv_chart_url": f"https://www.tradingview.com/chart/?symbol={c['symbol']}",
         })
 
     logger.info(
@@ -265,6 +295,16 @@ def _build_tv_filters(cfg: dict) -> list[dict]:
     if cfg["market_cap_min"] > 0:
         f.append({"left": "market_cap_basic",
                   "operation": "greater", "right": cfg["market_cap_min"]})
+
+    # Exchange filter (server-side — only scan selected exchanges)
+    if cfg.get("exchanges"):
+        f.append({"left": "exchange", "operation": "in_range", "right": cfg["exchanges"]})
+
+    # ADX: trend strength (server-side)
+    if cfg["adx_min"] > 0:
+        f.append({"left": "ADX", "operation": "greater", "right": cfg["adx_min"]})
+    # 3-month performance (server-side)
+    f.append({"left": "Perf.3M", "operation": "greater", "right": cfg["perf_3m_min"]})
 
     return f
 
@@ -332,18 +372,47 @@ def _local_refinement(sym: str, v: dict, cfg: dict) -> dict | None:
     if e50 and ema50_pct > cfg["ema50_proximity"]:
         return None
 
+    # EMA spread — EMA20 must be meaningfully above EMA50 (requires arithmetic, can't be server-side)
+    if e20 and e50:
+        ema_spread_pct = (e20 - e50) / e50 * 100
+        if ema_spread_pct < cfg["ema_spread_min"]:
+            return None
+    else:
+        ema_spread_pct = 0.0
+
+    # 52-week high proximity (requires arithmetic on two TV columns)
+    w52_high = v.get("price_52_week_high") or 0
+    pct_from_52wh = ((close - w52_high) / w52_high * 100) if w52_high else -100
+    if w52_high and abs(pct_from_52wh) > cfg["52w_high_pct_max"]:
+        return None
+
+    # Earnings date from TV (Unix timestamp → date, or None if unavailable)
+    tv_earn_ts = v.get("earnings_release_next_date")
+    tv_earn_date: date | None = None
+    if tv_earn_ts:
+        try:
+            tv_earn_date = datetime.fromtimestamp(float(tv_earn_ts), tz=timezone.utc).date()
+        except Exception:
+            pass
+
     return {
-        "symbol":     sym,
-        "price":      close,
-        "rsi":        rsi,
-        "ema20":      e20,
-        "ema50":      e50,
-        "ema100":     e100,
-        "ema200":     e200,
-        "ema50_pct":  ema50_pct,
-        "avg_vol":    avg_vol,
-        "rel_vol":    round(rel_vol, 2),
-        "market_cap": v.get("market_cap_basic") or 0,
+        "symbol":        sym,
+        "price":         close,
+        "rsi":           rsi,
+        "ema20":         e20,
+        "ema50":         e50,
+        "ema100":        e100,
+        "ema200":        e200,
+        "ema50_pct":     ema50_pct,
+        "avg_vol":       avg_vol,
+        "rel_vol":       round(rel_vol, 2),
+        "market_cap":    v.get("market_cap_basic") or 0,
+        "tv_earn_date":  tv_earn_date,   # None → pass-2 will call Yahoo Finance
+        "ema_spread":    round(ema_spread_pct, 2),
+        "adx":           v.get("ADX") or 0,
+        "perf_1m":       v.get("Perf.1M") or 0,
+        "perf_3m":       v.get("Perf.3M") or 0,
+        "pct_from_52wh": round(pct_from_52wh, 1),
     }
 
 
@@ -434,11 +503,148 @@ def _tv_filter_saved_screener(
     return candidates
 
 
+# ── AI chart review (pass 2 gate) ────────────────────────────────────────────
+
+def _ai_chart_review(
+    db,
+    symbol: str,
+    df: pd.DataFrame,
+    c: dict,
+    user_id: int,
+) -> dict:
+    """
+    Analyse the chart setup using the already-fetched OHLCV data.
+    Derives price-action metrics a trader reads visually (volume contraction,
+    pullback depth, EMA positioning, candle quality) and asks the AI to grade
+    the setup: A (excellent) / B (acceptable) / C (marginal) / SKIP (reject).
+
+    Returns {"grade": str, "pass": bool, "reasoning": str}.
+    Falls back to {"grade": "B", "pass": True, "reasoning": "AI unavailable"}
+    so the screener does not stall when no AI key is configured.
+    """
+    try:
+        from .claude_analyst import _call_ai
+        import json as _json
+
+        close  = df["Close"].to_numpy(dtype=float)
+        high   = df["High"].to_numpy(dtype=float)
+        low    = df["Low"].to_numpy(dtype=float)
+        vol    = df["Volume"].to_numpy(dtype=float)
+        n      = len(close)
+
+        # ── Price action metrics ──────────────────────────────────────────────
+        recent = min(10, n)
+        bars   = df.tail(recent)
+
+        # Volume: is it contracting during the pullback?
+        vol_recent = vol[-5:].mean()   if n >= 5  else vol.mean()
+        vol_prior  = vol[-10:-5].mean() if n >= 10 else vol.mean()
+        vol_contraction = vol_recent < vol_prior * 0.9   # >10% contraction = healthy
+
+        # Pullback depth from recent 20-bar swing high
+        swing_high = high[-20:].max() if n >= 20 else high.max()
+        pullback_pct = (swing_high - close[-1]) / swing_high * 100
+
+        # How many of the last 10 bars closed above EMA50?
+        e50 = c.get("ema50") or 0
+        bars_above_ema50 = sum(1 for x in close[-10:] if e50 and x > e50) if n >= 10 else "n/a"
+
+        # Average candle body/range ratio (last 10 bars) — small bodies = indecision/pullback
+        opens  = df["Open"].to_numpy(dtype=float)
+        bodies = np.abs(close - opens)
+        ranges = high - low
+        avg_body_ratio = (bodies[-recent:] / np.where(ranges[-recent:] > 0, ranges[-recent:], 1)).mean()
+
+        # Recent bar table (last 7 bars, compact)
+        bar_rows = []
+        for i in range(max(0, n - 7), n):
+            direction = "▲" if close[i] >= opens[i] else "▼"
+            bar_rows.append(
+                f"  {direction} O:{opens[i]:.2f} H:{high[i]:.2f} L:{low[i]:.2f} "
+                f"C:{close[i]:.2f} Vol:{vol[i]/1e6:.2f}M"
+            )
+        bar_table = "\n".join(bar_rows)
+
+        # ── Prompt ────────────────────────────────────────────────────────────
+        prompt = f"""You are an expert technical analyst specialising in Minervini-style Stage 2 pullback setups.
+
+Review the following chart data for {symbol} and grade the setup:
+
+QUANTITATIVE METRICS (already passed all quantitative filters):
+• Price:        ${c['price']:.2f}
+• EMA20:        ${c.get('ema20', 0):.2f}   EMA50: ${c.get('ema50', 0):.2f}   EMA100: ${c.get('ema100', 0):.2f}   EMA200: ${c.get('ema200', 0):.2f}
+• EMA20/50 spread: {c.get('ema_spread', 0):.2f}%   (higher = better-defined uptrend)
+• RSI:          {c.get('rsi', 0):.1f}   (target: 40–60 reset zone)
+• ADX:          {c.get('adx', 0):.1f}   (>25 = strong trend)
+• PPST:         {"BULLISH ✅" if c.get("ppst_bullish") else "bearish ❌"}
+• Dist. from EMA50: {c.get('ema50_pct', 0):.1f}%
+• % below 52W high: {abs(c.get('pct_from_52wh', 0)):.1f}%
+• 1M performance:   {c.get('perf_1m', 0):+.1f}%
+• 3M performance:   {c.get('perf_3m', 0):+.1f}%
+• Earnings:     {f"{c.get('days_to_earnings', '?')} days away" if c.get('days_to_earnings') is not None else "unknown"}
+
+PRICE-ACTION ANALYSIS (derived from 60-day OHLCV):
+• Pullback depth from 20-bar swing high: {pullback_pct:.1f}%
+• Volume contraction on pullback:        {"YES ✅ (healthy)" if vol_contraction else "NO ⚠️ (elevated selling)"}
+• Recent avg vol:  {vol_recent/1e6:.2f}M   Prior avg vol: {vol_prior/1e6:.2f}M
+• Bars above EMA50 (last 10):            {bars_above_ema50}/10
+• Avg candle body/range:                 {avg_body_ratio:.2f}   (0.3–0.6 = orderly, <0.3 = indecision)
+
+LAST 7 DAILY BARS:
+{bar_table}
+
+GRADING CRITERIA:
+A — Pristine Stage 2 pullback: EMAs well-fanned, volume contracts on pullback, price near EMA support, PPST bullish, RSI reset 45–55, recent momentum positive.
+B — Solid setup with one minor blemish (e.g. slightly elevated pullback volume, RSI at edge of range, modest 3M perf).
+C — Marginal: passes filters but chart is messy, volume not contracting, or trend quality is weak.
+SKIP — Reject: downtrend bounce not a real pullback, excessive earnings risk, volume expanding on decline, or broken trend structure.
+
+Respond ONLY with a single compact JSON object on one line — no markdown fences, no newlines inside strings, no trailing text:
+{{"grade":"A|B|C|SKIP","reasoning":"Max 30-word plain-English summary"}}"""
+
+        raw = _call_ai(db, prompt, max_tokens=250, user_id=user_id)
+        if not raw:
+            return {"grade": "B", "pass": True, "reasoning": "AI key not configured — skipping chart review"}
+
+        # Robust JSON extraction — find first {{ ... }} block, handle truncation
+        import re as _re
+        text = raw.strip()
+        # Strip markdown fences if present
+        text = _re.sub(r"^```[a-z]*\n?", "", text)
+        text = _re.sub(r"\n?```$", "", text)
+        text = text.strip()
+        # Extract the first JSON object
+        m = _re.search(r'\{[^{}]*\}', text, _re.DOTALL)
+        if not m:
+            logger.warning("AI chart review %s: no JSON found in response: %s", symbol, text[:200])
+            return {"grade": "B", "pass": True, "reasoning": "AI response unparseable — allowing through"}
+        raw_json = m.group(0)
+        # Sanitise: replace real newlines inside strings with spaces
+        raw_json = _re.sub(r'\n', ' ', raw_json)
+        result = _json.loads(raw_json)
+
+        grade     = result.get("grade", "B").strip().upper()
+        reasoning = result.get("reasoning", "")
+
+        logger.info("AI chart review %s: grade=%s — %s", symbol, grade, reasoning[:120])
+        return {"grade": grade, "pass": grade not in ("C", "SKIP"), "reasoning": reasoning}
+
+    except Exception as exc:
+        logger.warning("AI chart review %s failed: %s — allowing through", symbol, exc)
+        return {"grade": "?", "pass": True, "reasoning": f"AI review error: {exc}"}
+
+
 # ── Pass 2: PPST + earnings ───────────────────────────────────────────────────
 
-def _score_candidates(candidates: list[dict], cfg: dict) -> list[dict]:
+def _score_candidates(
+    candidates: list[dict],
+    cfg: dict,
+    db=None,
+    user_id: int = None,
+) -> list[dict]:
     """
-    For each candidate: compute PPST from OHLCV, check earnings date.
+    For each candidate: compute PPST from OHLCV, check earnings date,
+    optionally run AI chart review (pb_ai_chart_review=true).
     Returns the filtered + scored subset.
     """
     from .strategies.yf_client import fetch_ohlcv, get_next_earnings_date
@@ -467,29 +673,65 @@ def _score_candidates(candidates: list[dict], cfg: dict) -> list[dict]:
                 continue
 
             # ── Earnings gate ─────────────────────────────────────────────────
+            # Source priority: TV (already fetched in pass-1) → Yahoo Finance → block/allow
             days_to_earnings = None
             if cfg["earnings_days_min"] > 0:
-                next_earn = get_next_earnings_date(sym)
-                if next_earn is not None:
+                next_earn = c.get("tv_earn_date")   # from TV pass-1 (free)
+                if next_earn is None:
+                    # TV had no date — try Yahoo Finance as fallback
+                    next_earn = get_next_earnings_date(sym)
+                    if next_earn is not None:
+                        logger.debug("Pullback: %s earnings from Yahoo Finance: %s", sym, next_earn)
+
+                if next_earn is None:
+                    # Both sources unknown — block by default unless user opts out
+                    if cfg["block_unknown_earnings"]:
+                        logger.debug(
+                            "Pullback: %s skipped — earnings date unknown (block_unknown_earnings=true)",
+                            sym,
+                        )
+                        continue
+                else:
                     days_to_earnings = (next_earn - today).days
                     if 0 <= days_to_earnings < cfg["earnings_days_min"]:
                         logger.debug(
-                            "Pullback: %s skipped — earnings in %d days",
-                            sym, days_to_earnings,
+                            "Pullback: %s skipped — earnings in %d days (min=%d)",
+                            sym, days_to_earnings, cfg["earnings_days_min"],
                         )
                         continue
 
-            # ── Score (1–5) ───────────────────────────────────────────────────
+            # ── AI chart review (optional pass-2 gate) ────────────────────────
+            ai_grade    = None
+            ai_reasoning = None
+            if cfg.get("ai_chart_review") and db is not None:
+                review = _ai_chart_review(db, sym, df, {**c, "ppst_bullish": ppst_bullish}, user_id)
+                ai_grade     = review["grade"]
+                ai_reasoning = review["reasoning"]
+                min_grade    = cfg.get("ai_chart_min_grade", "B")
+                grade_order  = {"A": 0, "B": 1, "C": 2, "SKIP": 3}
+                threshold    = grade_order.get(min_grade, 1)
+                if grade_order.get(ai_grade, 99) > threshold:
+                    logger.info(
+                        "Pullback: %s rejected by AI chart review (grade=%s, min=%s): %s",
+                        sym, ai_grade, min_grade, (ai_reasoning or "")[:120],
+                    )
+                    continue
+
+            # ── Score (1–6) ───────────────────────────────────────────────────
             score = 3
             if ppst_bullish:
                 score += 1
             if 45 <= c["rsi"] <= 55:
+                score += 1
+            if ai_grade == "A":
                 score += 1
 
             out.append({
                 **c,
                 "ppst_bullish":     ppst_bullish,
                 "days_to_earnings": days_to_earnings,
+                "ai_chart_grade":   ai_grade,
+                "ai_chart_reason":  ai_reasoning,
                 "score":            score,
             })
 

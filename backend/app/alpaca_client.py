@@ -2,6 +2,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
     LimitOrderRequest,
+    StopLimitOrderRequest,
     GetOrdersRequest,
     StopLossRequest,
     TakeProfitRequest,
@@ -21,22 +22,28 @@ def get_client(mode: str = "paper") -> TradingClient:
     if mode not in _clients:
         if mode == "paper":
             _clients[mode] = TradingClient(
-                api_key=settings.alpaca_paper_key,
-                secret_key=settings.alpaca_paper_secret,
+                api_key=(settings.alpaca_paper_key or "").strip(),
+                secret_key=(settings.alpaca_paper_secret or "").strip(),
                 paper=True,
             )
         else:
             _clients[mode] = TradingClient(
-                api_key=settings.alpaca_live_key,
-                secret_key=settings.alpaca_live_secret,
+                api_key=(settings.alpaca_live_key or "").strip(),
+                secret_key=(settings.alpaca_live_secret or "").strip(),
                 paper=False,
             )
     return _clients[mode]
 
 
 def get_client_for_keys(api_key: str, secret_key: str, paper: bool) -> TradingClient:
-    """Create a TradingClient from explicit credentials (per-user API requests)."""
-    return TradingClient(api_key=api_key, secret_key=secret_key, paper=paper)
+    """Create a TradingClient from explicit credentials (per-user API requests).
+    Strips surrounding whitespace so copy-paste artefacts don't cause 401s.
+    """
+    return TradingClient(
+        api_key=api_key.strip(),
+        secret_key=secret_key.strip(),
+        paper=paper,
+    )
 
 
 def get_account(mode: str = "paper"):
@@ -81,6 +88,18 @@ def place_market_buy(symbol: str, qty: float, mode: str = "paper"):
     return get_client(mode).submit_order(req)
 
 
+def place_limit_buy(symbol: str, qty: float, limit_price: float, mode: str = "paper"):
+    """DAY limit buy with no exit legs. Cancels automatically if not filled today."""
+    req = LimitOrderRequest(
+        symbol=symbol,
+        qty=round(qty, 0),
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+        limit_price=round(limit_price, 2),
+    )
+    return get_client(mode).submit_order(req)
+
+
 def place_market_sell(symbol: str, qty: float, mode: str = "paper"):
     """Simple market sell. GTC so it survives past market close."""
     req = MarketOrderRequest(
@@ -113,6 +132,61 @@ def place_bracket_buy(
         order_class=OrderClass.BRACKET,
         stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
         take_profit=TakeProfitRequest(limit_price=round(target_price, 2)),
+    )
+    return get_client(mode).submit_order(req)
+
+
+def place_limit_bracket_buy(
+    symbol: str,
+    qty: float,
+    entry_price: float,
+    stop_price: float,
+    target_price: float,
+    slippage_pct: float = 0.5,
+    mode: str = "paper",
+):
+    """
+    DAY limit buy with attached stop-loss and take-profit bracket.
+    Entry fills only up to entry_price × (1 + slippage_pct/100).
+    If not filled by end of day, Alpaca cancels automatically.
+    Use for pullback-to-MA entries where price is already near the target level.
+    """
+    limit_price = round(entry_price * (1 + slippage_pct / 100), 2)
+    req = LimitOrderRequest(
+        symbol=symbol,
+        qty=round(qty, 0),
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+        limit_price=limit_price,
+        order_class=OrderClass.BRACKET,
+        stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+        take_profit=TakeProfitRequest(limit_price=round(target_price, 2)),
+    )
+    return get_client(mode).submit_order(req)
+
+
+def place_stop_limit_buy(
+    symbol: str,
+    qty: float,
+    stop_price: float,
+    slippage_pct: float = 1.0,
+    mode: str = "paper",
+):
+    """
+    DAY stop-limit buy — for breakout entries.
+    Activates only when stock trades at or above stop_price (confirms the breakout),
+    then fills up to stop_price × (1 + slippage_pct/100).
+    Alpaca does not support brackets on stop-limit entries; the monitor will add
+    OCO exits on the next cycle after the entry fills.
+    """
+    limit_price = round(stop_price * (1 + slippage_pct / 100), 2)
+    req = StopLimitOrderRequest(
+        symbol=symbol,
+        qty=round(qty, 0),
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+        stop_price=round(stop_price, 2),
+        limit_price=limit_price,
     )
     return get_client(mode).submit_order(req)
 

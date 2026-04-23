@@ -74,6 +74,9 @@ def get_user_setting(db, key: str, default: str = "", user_id: int = None) -> st
 
 
 def set_user_setting(db, key: str, value: str, user_id: int):
+    # Strip whitespace from credential keys so copy-paste artefacts don't cause 401s
+    if key in _PRIVATE_KEYS and isinstance(value, str):
+        value = value.strip()
     db.execute(
         text("""
             INSERT INTO user_settings (user_id, key, value) VALUES (:uid, :k, :v)

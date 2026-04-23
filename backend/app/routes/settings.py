@@ -18,7 +18,9 @@ EDITABLE_KEYS = {
     "screener_min_score", "screener_vol_surge_pct", "screener_ema20_pct", "screener_ema50_pct",
     "screener_auto_run",
     "screener_schedule_day", "screener_schedule_time",       # legacy (single day/time)
-    "screener_schedule_days", "screener_schedule_times",     # multi-day / multi-time
+    "screener_schedule_days", "screener_schedule_times",     # Minervini multi-day / multi-time
+    "pb_screener_auto_run",
+    "pb_screener_schedule_days", "pb_screener_schedule_times",  # Pullback schedule
     "tv_username", "tv_password",
     # AI provider settings
     "ai_provider", "ai_api_key", "ai_model", "ai_base_url",
@@ -35,6 +37,13 @@ EDITABLE_KEYS = {
     "pb_ema50_above_ema100", "pb_ema100_above_ema200",
     "pb_ppst_required", "pb_ppst_pivot_period", "pb_ppst_period", "pb_ppst_multiplier",
     "pb_tv_screener_name",
+    "pb_block_unknown_earnings",
+    "pb_exchanges",
+    "pb_ema_spread_min", "pb_adx_min", "pb_52w_high_pct_max", "pb_3m_perf_min",
+    "tv_chart_layout_id",
+    "pb_ai_chart_review", "pb_ai_chart_min_grade",
+    "mv_entry_order_type", "mv_entry_slippage_pct",
+    "pb_entry_order_type", "pb_entry_slippage_pct",
 }
 
 

@@ -35,12 +35,13 @@ _HEADERS = {
 
 _session: requests.Session | None = None
 _session_warmed_at: float = 0.0
-_WARM_TTL = 3600  # re-warm cookies every hour
+_crumb: str = ""
+_WARM_TTL = 3600  # re-warm cookies + crumb every hour
 
 
 def _get_session() -> requests.Session:
     """Return (and lazily warm) a shared requests session."""
-    global _session, _session_warmed_at
+    global _session, _session_warmed_at, _crumb
     now = time.monotonic()
 
     if _session is None:
@@ -48,15 +49,35 @@ def _get_session() -> requests.Session:
         _session.headers.update(_HEADERS)
 
     if now - _session_warmed_at > _WARM_TTL:
-        # Pre-warm: load yahoo.com to pick up consent cookie + crumb
+        # Step 1: load yahoo.com to pick up consent cookies
         try:
             _session.get("https://finance.yahoo.com", timeout=10)
             logger.debug("yf_client: session warmed (cookies: %s)", list(_session.cookies.keys()))
         except Exception as exc:
             logger.warning("yf_client: session warm-up failed (%s) — continuing anyway", exc)
+
+        # Step 2: fetch crumb — required for v10/quoteSummary since ~2023
+        try:
+            r = _session.get(
+                "https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=10
+            )
+            if r.status_code == 200 and r.text.strip():
+                _crumb = r.text.strip()
+                logger.debug("yf_client: crumb fetched (%s)", _crumb)
+            else:
+                logger.warning("yf_client: crumb fetch returned %d — quoteSummary calls may fail", r.status_code)
+        except Exception as exc:
+            logger.warning("yf_client: crumb fetch failed (%s) — quoteSummary calls may fail", exc)
+
         _session_warmed_at = now
 
     return _session
+
+
+def _get_crumb() -> str:
+    """Return the cached crumb, refreshing the session if needed."""
+    _get_session()   # ensures _crumb is populated
+    return _crumb
 
 
 def _parse_chart_response(body: dict, ohlcv: bool = False) -> pd.DataFrame:
@@ -166,31 +187,45 @@ def get_next_earnings_date(symbol: str) -> "date | None":
     """
     Return the next upcoming earnings date, or None if unknown.
     Uses Yahoo Finance quoteSummary calendarEvents module.
+    Tries query1 first, falls back to query2 (mirrors OHLCV pattern).
     """
     from datetime import date as _date
     session = _get_session()
-    try:
-        url  = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
-        resp = session.get(url, params={"modules": "calendarEvents"}, timeout=10)
-        resp.raise_for_status()
-        data     = resp.json()
-        result   = data.get("quoteSummary", {}).get("result") or []
-        if not result:
+    crumb   = _get_crumb()
+    today   = _date.today()
+
+    for host in ("query1", "query2"):
+        try:
+            url    = f"https://{host}.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+            params = {"modules": "calendarEvents"}
+            if crumb:
+                params["crumb"] = crumb
+            resp = session.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            data    = resp.json()
+            result  = data.get("quoteSummary", {}).get("result") or []
+            if not result:
+                continue
+            earnings = result[0].get("calendarEvents", {}).get("earnings", {})
+            dates    = earnings.get("earningsDate", [])
+            if not dates:
+                continue
+            for d in dates:
+                raw = d.get("raw") if isinstance(d, dict) else d
+                if raw:
+                    try:
+                        ed = _date.fromtimestamp(int(raw))
+                        if ed >= today:
+                            return ed
+                    except Exception:
+                        pass
+            # dates list present but all in the past — earnings unknown
+            logger.debug("get_next_earnings_date %s: all dates are past (%s)", symbol, dates)
             return None
-        earnings = result[0].get("calendarEvents", {}).get("earnings", {})
-        dates    = earnings.get("earningsDate", [])
-        today    = _date.today()
-        for d in dates:
-            raw = d.get("raw") if isinstance(d, dict) else d
-            if raw:
-                try:
-                    ed = _date.fromtimestamp(int(raw))
-                    if ed >= today:
-                        return ed
-                except Exception:
-                    pass
-    except Exception as exc:
-        logger.debug("get_next_earnings_date %s: %s", symbol, exc)
+        except Exception as exc:
+            logger.debug("get_next_earnings_date %s [%s]: %s", symbol, host, exc)
+
+    logger.warning("get_next_earnings_date %s: both hosts failed — earnings date unknown", symbol)
     return None
 
 

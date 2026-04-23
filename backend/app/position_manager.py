@@ -138,6 +138,73 @@ def _infer_close_reason(db: Session, symbol: str, mode: str) -> tuple[str, float
         return "manual", None, None
 
 
+def _place_entry(
+    db: Session,
+    sym: str,
+    qty: float,
+    entry: float,
+    stop: float,
+    target: float,
+    trigger: str,
+    mode: str,
+    screener_type: str = "minervini",
+) -> str:
+    """
+    Submit the entry buy using the user-configured order type.
+    Returns a short description string for logging.
+
+    Settings are split by screener source:
+      mv_entry_order_type / mv_entry_slippage_pct  — Minervini/breakout picks
+      pb_entry_order_type / pb_entry_slippage_pct  — Pullback-to-MA picks
+
+    order_type values:
+      market     — market order + bracket exits (original behaviour)
+      limit      — DAY limit at entry×(1+slippage%), bracket exits attached
+      stop_limit — DAY stop-limit at entry price, limit at entry×(1+slippage%);
+                   Alpaca does not support brackets here so exits are added by
+                   the monitor on the next cycle after fill
+    """
+    if screener_type == "pullback":
+        order_type   = get_setting(db, "pb_entry_order_type",   "limit")
+        slippage_pct = float(get_setting(db, "pb_entry_slippage_pct", "0.5"))
+    else:  # minervini (default)
+        order_type   = get_setting(db, "mv_entry_order_type",   "stop_limit")
+        slippage_pct = float(get_setting(db, "mv_entry_slippage_pct", "1.0"))
+    has_exits    = stop > 0 and target > 0
+
+    if order_type == "limit":
+        limit_px = round(entry * (1 + slippage_pct / 100), 2)
+        if has_exits:
+            try:
+                alp.place_limit_bracket_buy(sym, qty, entry, stop, target, slippage_pct, mode)
+                return f"limit bracket (lim=${limit_px} stop=${stop:.2f} tgt=${target:.2f})"
+            except Exception as exc:
+                logger.error("_place_entry: limit bracket FAILED for %s: %s — falling back to market bracket", sym, exc)
+                alp.place_bracket_buy(sym, qty, stop, target, mode)
+                return f"market bracket [limit fallback] (stop=${stop:.2f} tgt=${target:.2f})"
+        else:
+            alp.place_limit_buy(sym, qty, limit_px, mode)
+            return f"limit buy (lim=${limit_px})"
+
+    elif order_type == "stop_limit":
+        limit_px = round(entry * (1 + slippage_pct / 100), 2)
+        alp.place_stop_limit_buy(sym, qty, entry, slippage_pct, mode)
+        return f"stop-limit (stop=${entry:.2f} lim=${limit_px}) — exits pending fill"
+
+    else:  # "market" or unrecognised — original behaviour
+        if has_exits:
+            try:
+                alp.place_bracket_buy(sym, qty, stop, target, mode)
+                return f"market bracket (stop=${stop:.2f} tgt=${target:.2f})"
+            except Exception as exc:
+                logger.error("_place_entry: market bracket FAILED for %s: %s — plain market buy", sym, exc)
+                alp.place_market_buy(sym, qty, mode)
+                return f"market buy [bracket failed]"
+        else:
+            alp.place_market_buy(sym, qty, mode)
+            return f"market buy"
+
+
 def run_monday_open(db: Session):
     """
     Called every Monday at 9:35 ET. Fills available position slots from the
@@ -165,7 +232,8 @@ def run_monday_open(db: Session):
 
     rows = db.execute(
         text("""
-            SELECT symbol, entry_price, stop_price, target1
+            SELECT symbol, entry_price, stop_price, target1,
+                   COALESCE(screener_type, 'minervini') AS screener_type
             FROM weekly_plan
             WHERE week_start = (
                 SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
@@ -198,6 +266,7 @@ def run_monday_open(db: Session):
         entry  = float(row[1] or 0)
         stop   = float(row[2] or 0)
         target = float(row[3] or 0)
+        stype  = row[4]
 
         if sym in held or entry <= 0:
             continue
@@ -211,31 +280,9 @@ def run_monday_open(db: Session):
             continue
 
         try:
-            order_placed = False
-            if stop > 0 and target > 0:
-                try:
-                    alp.place_bracket_buy(sym, qty, stop, target, mode)
-                    logger.info(
-                        "Monday open: bracket buy %s qty=%.0f entry=~$%.2f stop=$%.2f target=$%.2f",
-                        sym, qty, entry, stop, target,
-                    )
-                    order_placed = True
-                except Exception as bracket_exc:
-                    logger.error(
-                        "Monday open: bracket buy FAILED for %s: %s — falling back to market buy; "
-                        "exit guard will place OCO on next cycle.",
-                        sym, bracket_exc,
-                    )
-                    alp.place_market_buy(sym, qty, mode)
-                    order_placed = True
-            else:
-                alp.place_market_buy(sym, qty, mode)
-                logger.warning(
-                    "Monday open: %s has no stop/target — plain market buy placed. "
-                    "Use 'Set Stop / Target' on the position card to add exit orders.",
-                    sym,
-                )
-                order_placed = True
+            order_desc   = _place_entry(db, sym, qty, entry, stop, target, "MONDAY_OPEN", mode, stype)
+            order_placed = True
+            logger.info("Monday open: %s qty=%.0f — %s", sym, qty, order_desc)
 
             if not order_placed:
                 continue
@@ -354,7 +401,8 @@ def _refill_slot(
     held_tuple = tuple(current_positions) if current_positions else ("__none__",)
     pending_rows = db.execute(
         text("""
-            SELECT symbol, score, signal, entry_price, stop_price, target1, rationale, rank
+            SELECT symbol, score, signal, entry_price, stop_price, target1, rationale, rank,
+                   COALESCE(screener_type, 'minervini') AS screener_type
             FROM weekly_plan
             WHERE week_start = (
                 SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
@@ -436,9 +484,10 @@ def _execute_specific_pick(db: Session, mode: str, symbol: str, pending_picks: l
         logger.warning("Slot refill: recommended symbol %s not found in pending picks.", symbol)
         return
 
-    entry  = float(pick.get("entry_price") or 0)
-    stop   = float(pick.get("stop_price")  or 0)
-    target = float(pick.get("target1")     or 0)
+    entry  = float(pick.get("entry_price")   or 0)
+    stop   = float(pick.get("stop_price")   or 0)
+    target = float(pick.get("target1")      or 0)
+    stype  = pick.get("screener_type", "minervini")
 
     if entry <= 0:
         logger.warning("Slot refill: %s has no entry price — skipping.", symbol)
@@ -463,27 +512,8 @@ def _execute_specific_pick(db: Session, mode: str, symbol: str, pending_picks: l
         return
 
     try:
-        if stop > 0 and target > 0:
-            try:
-                alp.place_bracket_buy(symbol, qty, stop, target, mode)
-                logger.info(
-                    "Slot refill: bracket buy %s qty=%.0f stop=$%.2f target=$%.2f [%s]",
-                    symbol, qty, stop, target, mode,
-                )
-            except Exception as bracket_exc:
-                logger.error(
-                    "Slot refill: bracket buy FAILED for %s: %s — falling back to market buy; "
-                    "exit guard will place OCO on next cycle.",
-                    symbol, bracket_exc,
-                )
-                alp.place_market_buy(symbol, qty, mode)
-        else:
-            alp.place_market_buy(symbol, qty, mode)
-            logger.warning(
-                "Slot refill: %s has no stop/target — plain market buy placed. "
-                "Use 'Set Stop / Target' on the position card to add exit orders.",
-                symbol,
-            )
+        order_desc = _place_entry(db, symbol, qty, entry, stop, target, "SLOT_REFILL", mode, stype)
+        logger.info("Slot refill: %s qty=%.0f — %s [%s]", symbol, qty, order_desc, mode)
 
         db.execute(
             text("""
@@ -513,7 +543,8 @@ def _execute_next_pick(db: Session, mode: str, held: set):
     """Fallback — execute the next PENDING pick without slot-refill analysis."""
     row = db.execute(
         text("""
-            SELECT symbol, entry_price, stop_price, target1
+            SELECT symbol, entry_price, stop_price, target1,
+                   COALESCE(screener_type, 'minervini') AS screener_type
             FROM weekly_plan
             WHERE week_start = (
                 SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
@@ -534,6 +565,7 @@ def _execute_next_pick(db: Session, mode: str, held: set):
     entry  = float(row[1] or 0)
     stop   = float(row[2] or 0)
     target = float(row[3] or 0)
+    stype  = row[4]
 
     if sym in held or entry <= 0:
         return
@@ -555,23 +587,8 @@ def _execute_next_pick(db: Session, mode: str, held: set):
         return
 
     try:
-        if stop > 0 and target > 0:
-            try:
-                alp.place_bracket_buy(sym, qty, stop, target, mode)
-            except Exception as bracket_exc:
-                logger.error(
-                    "Post-close fallback: bracket buy FAILED for %s: %s — falling back to market buy; "
-                    "exit guard will place OCO on next cycle.",
-                    sym, bracket_exc,
-                )
-                alp.place_market_buy(sym, qty, mode)
-        else:
-            alp.place_market_buy(sym, qty, mode)
-            logger.warning(
-                "Post-close fallback: %s has no stop/target — plain market buy placed. "
-                "Use 'Set Stop / Target' on the position card to add exit orders.",
-                sym,
-            )
+        order_desc = _place_entry(db, sym, qty, entry, stop, target, "POST_CLOSE", mode, stype)
+        logger.info("Post-close fallback: %s qty=%.0f — %s", sym, qty, order_desc)
 
         db.execute(
             text("""
