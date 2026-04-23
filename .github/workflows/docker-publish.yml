@@ -66,14 +66,13 @@ jobs:
             echo "==> Pulling new images from Docker Hub"
             docker compose pull
 
-            echo "==> Cleaning project: stopping and removing containers + networks"
-            docker compose down --remove-orphans
-            docker compose rm -f
+            echo "==> Project: clean (stop + remove containers, preserve volumes)"
+            docker compose down
 
             echo "==> Pruning dangling images"
             docker image prune -f
 
-            echo "==> Rebuilding project with new images"
+            echo "==> Project: build (recreate containers from new images)"
             docker compose up -d
 
             echo "==> Done. Running containers:"
