@@ -257,7 +257,9 @@ def run_rs_screener(
 
         if allowed_exchanges and exch not in allowed_exchanges:
             continue
-        if sector.lower() in excluded_sectors:
+        if not sector:
+            logger.debug("RS screener: %s has no sector from TV, keeping.", sym)
+        elif any(excl in sector.lower() or sector.lower() in excl for excl in excluded_sectors):
             continue
         if cfg["require_stage2"] and ema50 > 0:
             if (price - ema50) / ema50 * 100 > cfg["max_extension"]:

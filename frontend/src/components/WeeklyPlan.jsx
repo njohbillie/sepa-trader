@@ -431,7 +431,11 @@ function PlanCard({ row, dd, ddLoading, onStatusChange, tvLayoutId }) {
             )}
           </div>
           <div className="flex items-center gap-3 mt-0.5 text-xs text-slate-400">
-            <span>Score <strong className="text-slate-200">{row.score}/6</strong></span>
+            {row.screener_type === 'rs_momentum' ? (
+              <span>RS <strong className="text-slate-200">{row.score}th</strong></span>
+            ) : (
+              <span>Score <strong className="text-slate-200">{row.score}/6</strong></span>
+            )}
             <span>Entry <strong className="text-slate-200">${Number(row.entry_price).toFixed(2)}</strong></span>
             <span>Stop <strong className="text-red-400">${Number(row.stop_price).toFixed(2)}</strong></span>
             <span>R:R <strong className="text-emerald-400">{rr}x</strong></span>
