@@ -21,6 +21,7 @@ def _fetch_alpaca_news(
     symbols: list[str],
     db: Session,
     user_id: int = None,
+    mode: str = "paper",
     limit: int = 3,
     hours: int = 48,
 ) -> dict[str, list[str]]:
@@ -28,6 +29,8 @@ def _fetch_alpaca_news(
     Fetch recent news headlines from Alpaca for a batch of symbols.
     Returns {symbol: ["Headline (Source, Date)", ...]} — empty list if none found.
     Falls back silently on any error so analysis still runs without news.
+    News content is mode-agnostic but credentials are resolved per mode so
+    users with only live keys (no paper keys) still get news in live mode.
     """
     import httpx
     from datetime import datetime, timezone, timedelta
@@ -35,21 +38,46 @@ def _fetch_alpaca_news(
     from .database import get_user_setting as _gus
 
     try:
-        # Resolve credentials — same logic as _get_portfolio_value
+        # Resolve credentials matching the active mode — same logic as _get_portfolio_value
         if user_id:
             from sqlalchemy import text as _text
             is_admin = db.execute(
                 _text("SELECT role FROM users WHERE id = :id"), {"id": user_id}
             ).scalar() == "admin"
-            key    = _gus(db, "alpaca_paper_key", "", user_id) or (
-                _cfg.alpaca_paper_key if is_admin else ""
-            )
-            secret = _gus(db, "alpaca_paper_secret", "", user_id) or (
-                _cfg.alpaca_paper_secret if is_admin else ""
-            )
+            if mode == "live":
+                key    = _gus(db, "alpaca_live_key",    "", user_id) or (
+                    _cfg.alpaca_live_key if is_admin else ""
+                )
+                secret = _gus(db, "alpaca_live_secret", "", user_id) or (
+                    _cfg.alpaca_live_secret if is_admin else ""
+                )
+            else:
+                key    = _gus(db, "alpaca_paper_key",    "", user_id) or (
+                    _cfg.alpaca_paper_key if is_admin else ""
+                )
+                secret = _gus(db, "alpaca_paper_secret", "", user_id) or (
+                    _cfg.alpaca_paper_secret if is_admin else ""
+                )
+            # Fall back to the other mode's keys if primary mode has none
+            if not key or not secret:
+                alt = "paper" if mode == "live" else "live"
+                key    = _gus(db, f"alpaca_{alt}_key",    "", user_id) or (
+                    getattr(_cfg, f"alpaca_{alt}_key", "") if is_admin else ""
+                )
+                secret = _gus(db, f"alpaca_{alt}_secret", "", user_id) or (
+                    getattr(_cfg, f"alpaca_{alt}_secret", "") if is_admin else ""
+                )
         else:
-            key    = (_cfg.alpaca_paper_key    or "").strip()
-            secret = (_cfg.alpaca_paper_secret or "").strip()
+            if mode == "live":
+                key    = (_cfg.alpaca_live_key    or "").strip()
+                secret = (_cfg.alpaca_live_secret or "").strip()
+            else:
+                key    = (_cfg.alpaca_paper_key    or "").strip()
+                secret = (_cfg.alpaca_paper_secret or "").strip()
+            # Fall back to the other mode's keys
+            if not key or not secret:
+                key    = (_cfg.alpaca_paper_key or _cfg.alpaca_live_key    or "").strip()
+                secret = (_cfg.alpaca_paper_secret or _cfg.alpaca_live_secret or "").strip()
 
         if not key or not secret:
             return {}
@@ -233,7 +261,7 @@ Breadth   : {f"{breadth}% sector ETFs above 50MA" if breadth is not None else 'N
 Note: Tape is context only — it does not override position-sizing rules. A CAUTION/UNFAVORABLE tape warrants a WARN unless rules are clearly violated (ABORT).
 """
 
-    symbol_news = _fetch_alpaca_news([symbol], db, user_id).get(symbol, [])
+    symbol_news = _fetch_alpaca_news([symbol], db, user_id, mode=mode).get(symbol, [])
     news_block  = (
         "\n--- RECENT NEWS (last 48h) ---\n" + "\n".join(f"• {h}" for h in symbol_news)
         if symbol_news else ""
@@ -522,7 +550,7 @@ def _parse_slot_refill_response(text: str, pending_picks: list[dict]) -> dict:
 
 # ── Post-close / weekly pick analysis ────────────────────────────────────────
 
-def analyze_picks(db: Session, picks: list[dict], closed_position: dict | None = None, user_id: int = None) -> str:
+def analyze_picks(db: Session, picks: list[dict], closed_position: dict | None = None, user_id: int = None, mode: str = "paper") -> str:
     if not get_user_setting(db, "ai_api_key", "", user_id):
         raise ValueError("AI API key not configured in Settings.")
 
@@ -536,7 +564,7 @@ def analyze_picks(db: Session, picks: list[dict], closed_position: dict | None =
         )
 
     all_symbols = [p["symbol"] for p in picks]
-    news_map    = _fetch_alpaca_news(all_symbols, db, user_id)
+    news_map    = _fetch_alpaca_news(all_symbols, db, user_id, mode=mode)
 
     lines = []
     for i, p in enumerate(picks, 1):
@@ -638,6 +666,7 @@ def analyze_picks_structured(
     picks: list[dict],
     tape_context: dict | None = None,
     user_id: int = None,
+    mode: str = "paper",
 ) -> list[dict]:
     """
     Structured per-stock AI analysis for the weekly plan.
@@ -664,7 +693,7 @@ def analyze_picks_structured(
     if not pending:
         return []
 
-    news_map = _fetch_alpaca_news([p["symbol"] for p in pending], db, user_id)
+    news_map = _fetch_alpaca_news([p["symbol"] for p in pending], db, user_id, mode=mode)
 
     # Build pick context lines
     pick_lines = []

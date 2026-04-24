@@ -554,11 +554,11 @@ def trigger_analysis(current_user: dict = Depends(get_current_user), db: Session
 
     try:
         # 1 — Plain-text analysis for the log (existing behaviour)
-        text_analysis = analyze_picks(db, picks, user_id=uid)
+        text_analysis = analyze_picks(db, picks, user_id=uid, mode=mode)
         log_analysis(db, "manual", None, text_analysis, mode, user_id=uid)
 
         # 2 — Structured per-stock analysis
-        structured = analyze_picks_structured(db, picks, tape_context=tape_ctx, user_id=uid)
+        structured = analyze_picks_structured(db, picks, tape_context=tape_ctx, user_id=uid, mode=mode)
 
         # 3 — Persist per-stock JSON back into weekly_plan.ai_analysis
         week_start = db.execute(
