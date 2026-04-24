@@ -932,6 +932,12 @@ def fill_open_slots(
             continue
 
         qty = _size_qty(portfolio, price, stop, risk_pct, stop_pct)
+        # Cap at max_position_pct of portfolio
+        max_position_pct = float(get_setting(db, "max_position_pct", "20.0") or "20.0")
+        if price > 0:
+            max_shares = int(portfolio * max_position_pct / 100 / price)
+            if max_shares > 0:
+                qty = min(qty, max_shares)
         if qty < 1:
             logger.info("fill_open_slots: %s qty<1 (price=$%.2f stop=$%.2f) — skipping.", sym, price, stop)
             continue

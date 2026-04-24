@@ -261,6 +261,10 @@ Breadth   : {f"{breadth}% sector ETFs above 50MA" if breadth is not None else 'N
 Note: Tape is context only — it does not override position-sizing rules. A CAUTION/UNFAVORABLE tape warrants a WARN unless rules are clearly violated (ABORT).
 """
 
+    is_rs = "rs_momentum" in (trigger or "").lower()
+    min_rr    = 1.2 if is_rs else 2.0
+    rs_rr_note = " (RS Momentum strategy uses EMA50 structural stops — minimum is 1.2x)" if is_rs else ""
+
     symbol_news = _fetch_alpaca_news([symbol], db, user_id, mode=mode).get(symbol, [])
     news_block  = (
         "\n--- RECENT NEWS (last 48h) ---\n" + "\n".join(f"• {h}" for h in symbol_news)
@@ -297,13 +301,13 @@ Buying power:    ${buying_power:,.2f}
 Account tier:    {account_tier}
 
 --- RULES (thresholds set by account tier) ---
-1. R:R must be >= 2.0x. Current: {rr:.2f}x
+1. R:R must be >= {min_rr:.1f}x. Current: {rr:.2f}x{rs_rr_note}
 2. Risk per trade must be <= {max_risk_pct}% of portfolio. Current: {risk_pct_port:.2f}%
 3. Trade cost must not exceed buying power. Cost: ${trade_cost:,.2f}, BP: ${buying_power:,.2f}
 4. Single position must not exceed {max_position_pct}% of portfolio. Current: {pct_of_portfolio:.1f}%
 5. Cash after trade must remain >= {min_cash_pct}% of portfolio. After trade: {cash_after_pct:.1f}%
 {news_block}
-Use WARN for borderline cases (R:R 1.5–2.0, size near the limit).
+Use WARN for borderline cases (R:R within 0.3 of minimum, size near the limit).
 If recent news reveals earnings miss, guidance cut, FDA rejection, or major legal/regulatory risk — use WARN or ABORT even if position sizing rules pass.
 Use ABORT only for clear rule violations.
 Use PROCEED when all rules pass."""
