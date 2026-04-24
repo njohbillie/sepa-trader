@@ -78,6 +78,23 @@ const SECTIONS = [
     ],
   },
   {
+    title: 'RS Momentum Screener',
+    fields: [
+      { key: 'rs_screener_enabled',  label: 'Enable RS Momentum screener (runs alongside Minervini + Pullback)', type: 'toggle', defaultValue: 'true', span: true },
+      { key: 'rs_price_min',         label: 'Min price $ (default 10)',                               type: 'number' },
+      { key: 'rs_price_max',         label: 'Max price $ (0 = no ceiling)',                           type: 'number' },
+      { key: 'rs_avg_vol_min',       label: 'Min avg daily volume (default 500000)',                  type: 'number' },
+      { key: 'rs_market_cap_min',    label: 'Min market cap $ (default 500000000)',                   type: 'number' },
+      { key: 'rs_min_percentile',    label: 'Min RS percentile to qualify (default 70 = top 30%)',    type: 'number' },
+      { key: 'rs_max_extension',     label: 'Max % above EMA50 — rejects over-extended stocks (default 15)', type: 'number' },
+      { key: 'rs_top_n',             label: 'Top N picks from RS screener (default 5)',               type: 'number' },
+      { key: 'rs_require_stage2',    label: 'Require Stage 2 uptrend (price > EMA50 > EMA200)',       type: 'toggle', defaultValue: 'true' },
+      { key: 'rs_exchanges',         label: 'Exchanges to scan (default NYSE,NASDAQ)',                 type: 'exchange_picker', span: true, defaultValue: 'NYSE,NASDAQ' },
+      { key: 'rs_excluded_sectors',  label: 'Excluded sectors',                                       type: 'sector_picker',   span: true,
+        defaultValue: 'Consumer Defensive,Energy,Utilities,Real Estate,Basic Materials' },
+    ],
+  },
+  {
     title: 'Screener — Signal Filters',
     fields: [
       { key: 'screener_vol_surge_pct', label: 'Volume surge threshold % above avg (e.g. 40 = 1.4×)', type: 'number' },
@@ -106,6 +123,7 @@ const SECTIONS = [
       { key: 'max_positions',       label: 'Max simultaneous positions (overall cap)',              type: 'number' },
       { key: 'mv_max_slots',        label: 'Minervini slots (breakout picks, default 3)',           type: 'number' },
       { key: 'pb_max_slots',        label: 'Pullback slots (EMA picks, default 2)',                 type: 'number' },
+      { key: 'rs_max_slots',        label: 'RS Momentum slots (default 2)',                         type: 'number' },
       { key: 'mv_entry_order_type', label: 'Minervini entry order type', type: 'select',
         options: [
           { value: 'stop_limit', label: 'Stop-limit — activates only when price breaks out (recommended for Minervini)' },
