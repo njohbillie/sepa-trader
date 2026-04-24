@@ -560,9 +560,19 @@ def trigger_analysis(current_user: dict = Depends(get_current_user), db: Session
         # Build log text from the same structured result (no second AI call)
         log_lines = []
         for i, item in enumerate(structured, 1):
-            decision  = item.get("decision", "?")
-            rationale = item.get("rationale", "")
-            log_lines.append(f"{i}. **{item['symbol']}** — {decision}: {rationale}")
+            decision     = item.get("decision",      "?")
+            rationale    = item.get("rationale",     "")
+            entry_zone   = item.get("entry_zone",    "")
+            exit_strat   = item.get("exit_strategy", "")
+            guardrails   = item.get("guardrails",    "")
+            line = f"{i}. **{item['symbol']}** — {decision}: {rationale}"
+            if entry_zone:
+                line += f"\n   Entry: {entry_zone}"
+            if exit_strat:
+                line += f"\n   Exit: {exit_strat}"
+            if guardrails:
+                line += f"\n   Guardrails: {guardrails}"
+            log_lines.append(line)
         text_analysis = "\n".join(log_lines) if log_lines else "(no pending picks)"
         log_analysis(db, "manual", None, text_analysis, mode, user_id=uid)
 
