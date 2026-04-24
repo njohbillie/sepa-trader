@@ -459,10 +459,12 @@ async def run_monitor(db: Session, user_id: int | None = None, mode: str | None 
         clock       = alp.get_clock(mode)
         market_open = clock.is_open
 
-        acct      = alp.get_account(mode)
-        positions = alp.get_positions(mode)
-        portfolio = float(acct.portfolio_value)
-        day_pnl   = float(acct.equity) - float(acct.last_equity)
+        acct         = alp.get_account(mode)
+        positions    = alp.get_positions(mode)
+        portfolio    = float(acct.portfolio_value)
+        cash         = float(acct.cash)
+        buying_power = float(acct.buying_power)
+        day_pnl      = float(acct.equity) - float(acct.last_equity)
 
         if market_open and positions:
             try:
