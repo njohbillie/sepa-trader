@@ -195,7 +195,19 @@ def _run_migrations():
                 ('pb_beta_max',                 '2.5'),
                 ('pb_earnings_days_min',        '15'),
                 ('pb_ppst_required',            'true'),
-                ('pb_top_n',                    '5')
+                ('pb_top_n',                    '5'),
+                ('rs_screener_enabled',         'true'),
+                ('rs_price_min',                '10'),
+                ('rs_price_max',                '0'),
+                ('rs_avg_vol_min',              '500000'),
+                ('rs_market_cap_min',           '500000000'),
+                ('rs_min_percentile',           '70'),
+                ('rs_require_stage2',           'true'),
+                ('rs_max_extension',            '15'),
+                ('rs_top_n',                    '5'),
+                ('rs_max_slots',                '2'),
+                ('rs_exchanges',                'NYSE,NASDAQ'),
+                ('rs_excluded_sectors',         'Consumer Defensive,Energy,Utilities,Real Estate,Basic Materials')
             ON CONFLICT (key) DO NOTHING
         """))
 

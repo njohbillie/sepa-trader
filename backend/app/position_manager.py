@@ -207,14 +207,14 @@ def _place_entry(
             return f"market buy"
 
 
-def _count_positions_by_type(db: Session, mode: str, symbols: set) -> tuple[int, int]:
+def _count_positions_by_type(db: Session, mode: str, symbols: set) -> tuple[int, int, int]:
     """
-    Return (mv_count, pb_count) of currently held positions by screener type.
+    Return (mv_count, pb_count, rs_count) of currently held positions by screener type.
     Looks up the screener_type from the most recent EXECUTED weekly_plan row.
-    'both' and 'minervini' count toward mv; 'pullback' counts toward pb.
+    'both' and 'minervini' → mv; 'pullback' → pb; 'rs_momentum' → rs.
     """
     if not symbols:
-        return 0, 0
+        return 0, 0, 0
     rows = db.execute(
         text("""
             SELECT COALESCE(screener_type, 'minervini') AS stype, COUNT(*) AS cnt
@@ -228,13 +228,15 @@ def _count_positions_by_type(db: Session, mode: str, symbols: set) -> tuple[int,
         """),
         {"syms": tuple(symbols), "mode": mode},
     ).fetchall()
-    mv, pb = 0, 0
+    mv, pb, rs = 0, 0, 0
     for stype, cnt in rows:
         if stype in ("minervini", "both"):
             mv += cnt
+        elif stype == "rs_momentum":
+            rs += cnt
         else:
             pb += cnt
-    return mv, pb
+    return mv, pb, rs
 
 
 def _get_symbol_screener_type(db: Session, symbol: str, mode: str) -> str:
@@ -834,11 +836,14 @@ def fill_open_slots(
     if total_held >= max_pos:
         return
 
-    mv_held, pb_held = _count_positions_by_type(db, mode, held_symbols)
+    rs_max = int(get_setting(db, "rs_max_slots", "2") or "2")
+
+    mv_held, pb_held, rs_held = _count_positions_by_type(db, mode, held_symbols)
     mv_slots = max(0, mv_max - mv_held)
     pb_slots = max(0, pb_max - pb_held)
+    rs_slots = max(0, rs_max - rs_held)
 
-    if mv_slots == 0 and pb_slots == 0:
+    if mv_slots == 0 and pb_slots == 0 and rs_slots == 0:
         logger.debug("fill_open_slots [%s]: all strategy slots full — skipping.", mode)
         return
 
@@ -863,8 +868,8 @@ def fill_open_slots(
         return
 
     logger.info(
-        "fill_open_slots [%s]: %d PENDING picks | slots mv=%d pb=%d | held=%d/%d",
-        mode, len(rows), mv_slots, pb_slots, total_held, max_pos,
+        "fill_open_slots [%s]: %d PENDING picks | slots mv=%d pb=%d rs=%d | held=%d/%d",
+        mode, len(rows), mv_slots, pb_slots, rs_slots, total_held, max_pos,
     )
 
     # Build cooldown set: symbols sold within the last 8 hours — never re-enter same day
@@ -904,15 +909,24 @@ def fill_open_slots(
         elif stype == "pullback":
             if pb_slots <= 0:
                 continue
+        elif stype == "rs_momentum":
+            if rs_slots <= 0:
+                continue
 
-        # Confirm current signal before buying — don't buy stale screener picks
-        result  = analyze(sym, db=db)
-        signal  = result.get("signal", "ERROR")
-        price   = result.get("price") or entry
+        # RS momentum picks are already in Stage 2 by screener definition —
+        # skip SEPA signal confirmation and buy at current price.
+        if stype == "rs_momentum":
+            price = entry
+            signal = "RS_MOMENTUM"
+        else:
+            # Confirm current SEPA signal before buying stale screener picks
+            result = analyze(sym, db=db)
+            signal = result.get("signal", "ERROR")
+            price  = result.get("price") or entry
 
-        if signal not in ("BREAKOUT", "PULLBACK_EMA20", "PULLBACK_EMA50", "STAGE2_WATCH"):
-            logger.debug("fill_open_slots: %s signal=%s — skipping.", sym, signal)
-            continue
+            if signal not in ("BREAKOUT", "PULLBACK_EMA20", "PULLBACK_EMA50", "STAGE2_WATCH"):
+                logger.debug("fill_open_slots: %s signal=%s — skipping.", sym, signal)
+                continue
 
         if price <= 0:
             continue
@@ -955,11 +969,14 @@ def fill_open_slots(
             if stype in ("minervini", "both"):
                 mv_held  += 1
                 mv_slots -= 1
+            elif stype == "rs_momentum":
+                rs_held  += 1
+                rs_slots -= 1
             else:
                 pb_held  += 1
                 pb_slots -= 1
 
-            if total_held >= max_pos or (mv_slots == 0 and pb_slots == 0):
+            if total_held >= max_pos or (mv_slots == 0 and pb_slots == 0 and rs_slots == 0):
                 break
 
         except Exception as exc:

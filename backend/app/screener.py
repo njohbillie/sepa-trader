@@ -440,14 +440,18 @@ def run_both_screeners(
     _phase_cb=None,
 ) -> list[dict]:
     """
-    Run Minervini + Pullback-to-MA screeners, merge and deduplicate results.
+    Run all three screeners (Minervini, Pullback-to-MA, RS Momentum), merge and
+    deduplicate results.
 
-    Dedup rule: if a symbol appears in both screeners, keep the first occurrence
-    (Minervini rank wins) and tag it screener_type='both'.
+    Priority on overlap: Minervini > Pullback > RS Momentum.
+    Overlapping symbols are tagged screener_type='both'.
     Re-ranks the combined list 1..N.
     Saves the merged plan to weekly_plan.
+
+    RS screener can be disabled via the rs_screener_enabled setting.
     """
     from .pullback_screener import run_pullback_screener
+    from .rs_screener import run_rs_screener
 
     def _phase(msg):
         logger.info("Screener phase: %s", msg)
@@ -461,51 +465,52 @@ def run_both_screeners(
         from .database import get_user_setting as _gus
         mode = _gus(db, "trading_mode", "paper", user_id)
 
-    logger.info("Running both screeners (mode=%s, user=%s)…", mode, user_id)
+    logger.info("Running all screeners (mode=%s, user=%s)…", mode, user_id)
 
-    # Fetch account value once — shared by both screeners to avoid double Alpaca calls
-    # Log which credentials are being resolved so auth failures are diagnosable
     from .database import get_user_setting as _gus2
-    from .config import settings as _gs2
-    _live_key   = _gus2(db, "alpaca_live_key",    "", user_id) or _gs2.alpaca_live_key
-    _paper_key  = _gus2(db, "alpaca_paper_key",   "", user_id) or _gs2.alpaca_paper_key
-    _live_sec   = _gus2(db, "alpaca_live_secret",  "", user_id) or _gs2.alpaca_live_secret
-    logger.error(
-        "DIAG — mode=%s user_id=%s  live_key=%s live_secret_len=%d  paper_key=%s",
-        mode, user_id,
-        (_live_key[:8]  + "…") if _live_key  else "MISSING",
-        len(_live_sec)  if _live_sec  else 0,
-        (_paper_key[:8] + "…") if _paper_key else "MISSING",
-    )
 
     try:
         av = _get_portfolio_value(db, mode, user_id)
     except RuntimeError as exc:
-        # Re-raise with context so the UI shows the real Alpaca error
         raise RuntimeError(
-            f"Cannot reach Alpaca ({mode} mode) — {exc}. Both screeners aborted."
+            f"Cannot reach Alpaca ({mode} mode) — {exc}. All screeners aborted."
         ) from exc
     logger.info("Account value for screener run: $%.0f (mode=%s)", av, mode)
 
     _phase("Minervini: scanning universe via TradingView…")
     min_rows = run_screener(db, mode=mode, user_id=user_id, account_value=av)
+
     _phase(f"Minervini done — {len(min_rows)} candidates. Running Pullback screener…")
     pb_rows  = run_pullback_screener(db, mode=mode, user_id=user_id, account_value=av)
-    _phase(f"Pullback done — {len(pb_rows)} candidates. Merging results…")
 
-    # Merge: Minervini first, then Pullback, dedup by symbol
+    rs_enabled = _gus2(db, "rs_screener_enabled", "true", user_id).lower() == "true"
+    rs_rows: list[dict] = []
+    if rs_enabled:
+        _phase(f"Pullback done — {len(pb_rows)} candidates. Running RS Momentum screener…")
+        try:
+            rs_rows = run_rs_screener(db, mode=mode, user_id=user_id, account_value=av)
+        except Exception as exc:
+            logger.error("RS screener failed (non-fatal): %s", exc)
+    else:
+        _phase(f"Pullback done — {len(pb_rows)} candidates. RS screener disabled.")
+
+    _phase(f"RS done — {len(rs_rows)} candidates. Merging results…")
+
+    # Merge: Minervini wins on overlap, then Pullback, then RS
     seen: dict[str, dict] = {}
     for r in min_rows:
         seen[r["symbol"]] = r
     for r in pb_rows:
         if r["symbol"] in seen:
-            seen[r["symbol"]]["screener_type"] = "both"   # overlap
+            seen[r["symbol"]]["screener_type"] = "both"
         else:
+            seen[r["symbol"]] = r
+    for r in rs_rows:
+        if r["symbol"] not in seen:
             seen[r["symbol"]] = r
 
     merged = list(seen.values())
 
-    # Re-rank
     for i, row in enumerate(merged, 1):
         row["rank"] = i
 
@@ -513,7 +518,7 @@ def run_both_screeners(
     _save_plan(db, merged, week_start, mode, user_id)
 
     logger.info(
-        "Both screeners done: %d minervini + %d pullback = %d unique (mode=%s)",
-        len(min_rows), len(pb_rows), len(merged), mode,
+        "All screeners done: %d minervini + %d pullback + %d rs = %d unique (mode=%s)",
+        len(min_rows), len(pb_rows), len(rs_rows), len(merged), mode,
     )
     return merged
