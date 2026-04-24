@@ -380,9 +380,6 @@ def run_rs_screener(
         max_shares   = int(account_value * max_ppct / 100 / price) if price > 0 else 0
         shares       = min(shares, max_shares)
 
-        if shares < 1:
-            continue
-
         risk_amount   = round(shares * stop_distance, 2)
         rs_percentile = int((1 - (i - 1) / total) * 99) if total > 0 else 50
 

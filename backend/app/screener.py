@@ -475,6 +475,12 @@ def run_both_screeners(
         raise RuntimeError(
             f"Cannot reach Alpaca ({mode} mode) — {exc}. All screeners aborted."
         ) from exc
+    if av == 0:
+        logger.warning(
+            "Account value is $0 for mode=%s — live account may be unfunded. "
+            "All picks will show 0 shares; position sizing will be correct once funded.",
+            mode,
+        )
     logger.info("Account value for screener run: $%.0f (mode=%s)", av, mode)
 
     _phase("Minervini: scanning universe via TradingView…")
