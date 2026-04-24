@@ -588,11 +588,12 @@ def analyze_picks(db: Session, picks: list[dict], closed_position: dict | None =
     parts.append("Current week's top picks:\n" + "\n".join(lines))
     parts.append(
         "You are a professional swing-trader assistant using Minervini SEPA criteria.\n"
-        "For each PENDING pick above give a one-line recommendation: EXECUTE, WAIT, or SKIP "
-        "with a brief reason (≤15 words). Consider score, R:R ratio, signal quality, and any recent news.\n"
+        "For each PENDING pick output EXACTLY this format (one line per pick, no extra lines):\n"
+        "<number>. **SYMBOL** — EXECUTE|WAIT|SKIP: reason (≤15 words)\n"
+        "Rules: consider score, R:R ratio, signal quality, and any recent news.\n"
         "If news reveals an earnings miss, guidance cut, FDA rejection, or legal/regulatory risk, flag it.\n"
-        "RS Momentum picks (signal=RS_MOMENTUM) use EMA50 structural stops — R:R ≥1.2 is acceptable for them.\n"
-        "Output a numbered list only — no preamble."
+        "RS Momentum picks use EMA50 structural stops — R:R ≥1.2 is acceptable for them.\n"
+        "Output the numbered list only — no preamble, no extra text."
     )
 
     result = _call_ai(db, "\n\n".join(parts), max_tokens=1024, user_id=user_id)
