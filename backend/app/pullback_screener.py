@@ -634,7 +634,23 @@ SKIP — Reject: downtrend bounce not a real pullback, excessive earnings risk, 
 Respond ONLY with a single compact JSON object on one line — no markdown fences, no newlines inside strings, no trailing text:
 {{"grade":"A|B|C|SKIP","reasoning":"Max 30-word plain-English summary"}}"""
 
-        raw = _call_ai(db, prompt, max_tokens=250, user_id=user_id)
+        import time as _time
+        raw = None
+        for attempt in range(3):
+            try:
+                raw = _call_ai(db, prompt, max_tokens=250, user_id=user_id)
+                break
+            except Exception as _exc:
+                msg = str(_exc).lower()
+                if ("529" in msg or "overloaded" in msg) and attempt < 2:
+                    wait = 10 * (2 ** attempt)   # 10s, 20s
+                    logger.warning(
+                        "AI chart review %s: API overloaded (attempt %d/3) — retrying in %ds",
+                        symbol, attempt + 1, wait,
+                    )
+                    _time.sleep(wait)
+                else:
+                    raise
         if not raw:
             return {"grade": "B", "pass": True, "reasoning": "AI key not configured — skipping chart review"}
 
