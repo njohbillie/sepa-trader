@@ -1,3 +1,5 @@
+import hmac
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -5,7 +7,6 @@ from ..database import get_db, get_setting
 from ..trader import _log_signal, _log_trade, _size_position, _gate, _get_weekly_plan_exits
 from .. import alpaca_client as alp
 from .. import telegram_alerts as tg
-import asyncio
 
 router = APIRouter(prefix="/api/webhook", tags=["webhook"])
 
@@ -21,9 +22,11 @@ class TVAlert(BaseModel):
 
 @router.post("/tradingview")
 async def tradingview(alert: TVAlert, db: Session = Depends(get_db)):
-    # Validate webhook secret
+    # Validate webhook secret — must be configured; empty secret blocks ALL requests
     webhook_secret = get_setting(db, "webhook_secret", "")
-    if webhook_secret and alert.secret != webhook_secret:
+    if not webhook_secret:
+        raise HTTPException(status_code=403, detail="Webhook secret not configured")
+    if not hmac.compare_digest(alert.secret, webhook_secret):
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
 
     mode = get_setting(db, "trading_mode", "paper")

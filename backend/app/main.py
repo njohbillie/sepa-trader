@@ -135,7 +135,8 @@ def _run_migrations():
         db.execute(text("""
             INSERT INTO settings (key, value) VALUES
                 ('paper_auto_execute', 'true'),
-                ('live_auto_execute',  'false')
+                ('live_auto_execute',  'false'),
+                ('min_cash_pct',       '10.0')
             ON CONFLICT (key) DO NOTHING
         """))
 
@@ -227,7 +228,8 @@ def _run_migrations():
                 ('rs_exchanges',                'NYSE,NASDAQ'),
                 ('rs_excluded_sectors',         'Energy Minerals,Industrial Services,Non-Energy Minerals,Process Industries,Utilities,Consumer Non-Durables'),
                 ('paper_auto_execute',           'true'),
-                ('live_auto_execute',            'false')
+                ('live_auto_execute',            'false'),
+                ('min_cash_pct',                '10.0')
             ON CONFLICT (key) DO NOTHING
         """))
 
@@ -271,9 +273,14 @@ def _bootstrap_admin(db):
             logger.warning("=" * 60)
             logger.warning("ADMIN ACCOUNT CREATED")
             logger.warning("  Email:    %s", admin_email)
-            logger.warning("  Password: %s", admin_password)
-            logger.warning("Change this immediately in the Admin panel.")
+            logger.warning("  Password: [printed to stdout only — not logged]")
+            logger.warning("Change this immediately via Settings → Change Password.")
             logger.warning("=" * 60)
+            # Print to stdout (not captured by most log collectors)
+            print(f"\n{'='*60}")
+            print(f"  ADMIN PASSWORD: {admin_password}")
+            print(f"  Change this immediately via Settings → Change Password.")
+            print(f"{'='*60}\n", flush=True)
 
         row = db.execute(
             text("""
@@ -296,8 +303,16 @@ def _bootstrap_admin(db):
     db.commit()
 
 
+_DEFAULT_SECRET = "dev-secret-change-me"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.secret_key == _DEFAULT_SECRET:
+        logger.warning("=" * 60)
+        logger.warning("SECURITY WARNING: SECRET_KEY is the default dev value.")
+        logger.warning("Set a strong SECRET_KEY in your .env before going to production.")
+        logger.warning("=" * 60)
     _run_migrations()
     start_scheduler()
     yield
@@ -316,8 +331,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
 from .routes import auth as auth_route, admin as admin_route, strategies as strategies_route

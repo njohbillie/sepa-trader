@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # CORS — comma-separated list of allowed frontend origins
     allowed_origins: str = "http://localhost,http://localhost:5173,http://localhost:3000"
 
+    # Set to true in production (HTTPS only) to mark auth cookies Secure
+    secure_cookies: bool = False
+
     class Config:
         env_file = ".env"
 

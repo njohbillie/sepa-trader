@@ -17,10 +17,11 @@ from ..auth import (
     REFRESH_TOKEN_EXPIRE_DAYS,
 )
 from ..database import get_db, get_current_user
+from ..config import settings as _cfg
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-_SECURE_COOKIE = False   # set True when serving over HTTPS
+_SECURE_COOKIE = _cfg.secure_cookies   # set SECURE_COOKIES=true in .env for HTTPS production
 
 
 def _set_auth_cookies(response: Response, user_id: int, role: str):
