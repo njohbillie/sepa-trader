@@ -430,8 +430,9 @@ async def run_monitor(db: Session, user_id: int | None = None, mode: str | None 
             auto_execute = _s.get("live_auto_execute", "false").lower() == "true"
         else:
             auto_execute = _s.get("paper_auto_execute", _s.get("auto_execute", "true")).lower() == "true"
-        risk_pct     = float(_s.get("risk_pct", "2.0") or "2.0")
-        stop_pct     = float(_s.get("stop_loss_pct", "8.0") or "8.0")
+        risk_pct         = float(_s.get("risk_pct", "2.0") or "2.0")
+        stop_pct         = float(_s.get("stop_loss_pct", "8.0") or "8.0")
+        interval_minutes = int(_s.get("monitor_interval_minutes", "30") or "30")
         try:
             alp.configure_from_db_settings(_s, mode, is_admin=True)
         except ValueError as _creds_err:
@@ -444,8 +445,9 @@ async def run_monitor(db: Session, user_id: int | None = None, mode: str | None 
             auto_execute = get_setting(db, "live_auto_execute",  "false").lower() == "true"
         else:
             auto_execute = get_setting(db, "paper_auto_execute", get_setting(db, "auto_execute", "true")).lower() == "true"
-        risk_pct     = float(get_setting(db, "risk_pct", "2.0"))
-        stop_pct     = float(get_setting(db, "stop_loss_pct", "8.0"))
+        risk_pct         = float(get_setting(db, "risk_pct", "2.0"))
+        stop_pct         = float(get_setting(db, "stop_loss_pct", "8.0"))
+        interval_minutes = int(get_setting(db, "monitor_interval_minutes", "30") or "30")
 
     if mode == "live" and auto_execute:
         logger.warning(
@@ -561,7 +563,7 @@ async def run_monitor(db: Session, user_id: int | None = None, mode: str | None 
         if new_breakouts:
             asyncio.create_task(tg.alert_breakout(new_breakouts, mode))
 
-        asyncio.create_task(tg.alert_monitor_summary(portfolio, day_pnl, len(positions), mode))
+        asyncio.create_task(tg.alert_monitor_summary(portfolio, day_pnl, len(positions), mode, interval_minutes))
 
         return {
             "status":        "ok",

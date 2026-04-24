@@ -44,10 +44,16 @@ async def alert_trade(action: str, symbol: str, qty: float, price: float, trigge
     )
 
 
-async def alert_monitor_summary(portfolio: float, day_pnl: float, positions: int, mode: str):
+async def alert_monitor_summary(portfolio: float, day_pnl: float, positions: int, mode: str, interval_minutes: int = 30):
     pnl_sign = "+" if day_pnl >= 0 else ""
+    if interval_minutes < 60:
+        freq = f"{interval_minutes}-min Check"
+    elif interval_minutes == 60:
+        freq = "Hourly Check"
+    else:
+        freq = f"{interval_minutes // 60}h Check"
     await send(
-        f"*Hourly Check* [{mode.upper()}]\n\n"
+        f"*{freq}* [{mode.upper()}]\n\n"
         f"Portfolio: `${portfolio:,.2f}`\nDay P&L: `{pnl_sign}${day_pnl:,.2f}`\nPositions: `{positions}`",
         level="INFO",
     )
