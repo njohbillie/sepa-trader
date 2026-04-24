@@ -57,7 +57,8 @@ def _gate(
 ) -> bool:
     """Pre-trade AI gate. Returns True if order should proceed. Fails open."""
     try:
-        from .claude_analyst import pre_trade_analysis, log_pre_trade
+        from .claude_analyst import pre_trade_analysis, log_pre_trade, get_stored_weekly_plan_analysis
+        stored       = get_stored_weekly_plan_analysis(db, symbol, mode)
         acct         = alp.get_account(mode)
         portfolio    = float(acct.portfolio_value)
         cash         = float(acct.cash)
@@ -68,7 +69,7 @@ def _gate(
             entry_price=entry, stop_price=stop, target_price=target,
             trigger=trigger, portfolio_value=portfolio,
             cash=cash, buying_power=buying_power, mode=mode,
-            user_id=user_id,
+            user_id=user_id, stored_analysis=stored,
         )
         log_pre_trade(
             db, symbol, trigger,
@@ -558,6 +559,27 @@ def _refill_slot(
         logger.info("Slot refill [%s]: no PENDING picks remaining.", mode)
         return
 
+    # Annotate each pending pick with its stored weekly-plan AI verdict.
+    # Two effects:
+    #   1. The slot-refill AI sees the weekly verdict and won't recommend SKIPs.
+    #   2. After the AI responds, we hard-filter any SKIP picks regardless of AI choice.
+    from .claude_analyst import get_stored_weekly_plan_analysis
+    for pick in pending_picks:
+        stored = get_stored_weekly_plan_analysis(db, pick["symbol"], mode)
+        pick["weekly_ai_verdict"] = stored.get("decision", "").upper() if stored else ""
+
+    # Pre-filter: drop SKIP-rated picks so they can never be recommended
+    eligible_picks = [p for p in pending_picks if p.get("weekly_ai_verdict") != "SKIP"]
+    skipped_syms = [p["symbol"] for p in pending_picks if p.get("weekly_ai_verdict") == "SKIP"]
+    if skipped_syms:
+        logger.info(
+            "Slot refill [%s]: dropping %s — rated SKIP in weekly analysis.",
+            mode, ", ".join(skipped_syms),
+        )
+    if not eligible_picks:
+        logger.info("Slot refill [%s]: all remaining picks are SKIP-rated — no refill.", mode)
+        return
+
     try:
         analysis = analyze_slot_refill(
             db=db,
@@ -569,7 +591,7 @@ def _refill_slot(
             cash=cash,
             buying_power=buying_power,
             open_positions=list(current_positions),
-            pending_picks=pending_picks,
+            pending_picks=eligible_picks,
             mode=mode,
         )
 
@@ -596,7 +618,20 @@ def _refill_slot(
             logger.info("Slot refill [%s]: %s — no new position opened.", mode, analysis["verdict"])
             return
 
-        _execute_specific_pick(db=db, mode=mode, symbol=analysis["symbol"], pending_picks=pending_picks)
+        # Hard SKIP guard: ensure the AI didn't hallucinate a SKIP-rated symbol
+        recommended = analysis["symbol"]
+        rec_verdict = next(
+            (p.get("weekly_ai_verdict", "") for p in pending_picks if p["symbol"] == recommended),
+            "",
+        )
+        if rec_verdict == "SKIP":
+            logger.warning(
+                "Slot refill [%s]: AI recommended %s but it is rated SKIP in weekly analysis — blocked.",
+                mode, recommended,
+            )
+            return
+
+        _execute_specific_pick(db=db, mode=mode, symbol=recommended, pending_picks=eligible_picks)
 
     except Exception as exc:
         logger.error(

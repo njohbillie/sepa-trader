@@ -375,7 +375,8 @@ def _gate(
 ) -> bool:
     """Pre-trade AI gate. Returns True if order should proceed. Fails open."""
     try:
-        from .claude_analyst import pre_trade_analysis, log_pre_trade
+        from .claude_analyst import pre_trade_analysis, log_pre_trade, get_stored_weekly_plan_analysis
+        stored       = get_stored_weekly_plan_analysis(db, symbol, mode)
         acct         = alp.get_account(mode)
         portfolio    = float(acct.portfolio_value)
         cash         = float(acct.cash)
@@ -390,6 +391,7 @@ def _gate(
             trigger=trigger, portfolio_value=portfolio,
             cash=cash, buying_power=buying_power, mode=mode,
             user_id=user_id, tape_context=tape_context,
+            stored_analysis=stored,
         )
         log_pre_trade(
             db, symbol, trigger,

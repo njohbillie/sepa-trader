@@ -184,6 +184,7 @@ def pre_trade_analysis(
     mode: str,
     user_id: int = None,
     tape_context: dict | None = None,
+    stored_analysis: dict | None = None,
 ) -> dict:
     """
     Ask Claude to evaluate a proposed trade before it is placed.
@@ -213,6 +214,27 @@ def pre_trade_analysis(
             "warnings": ["No AI API key set. Go to Settings → AI to add your key."],
             "analysis": "",
         }
+
+    # If the weekly-plan AI already evaluated this symbol and said SKIP →
+    # block immediately without a second AI call. This prevents the gate from
+    # contradicting a deliberate "don't trade this pick" verdict.
+    if stored_analysis:
+        stored_decision = str(stored_analysis.get("decision", "")).upper()
+        if stored_decision == "SKIP":
+            rationale  = stored_analysis.get("rationale",  "Weekly plan analysis rated this pick SKIP")
+            guardrails = stored_analysis.get("guardrails", "")
+            reason     = f"Weekly plan AI: SKIP — {rationale}"
+            logger.info("pre_trade_analysis: %s — SKIP from stored weekly analysis, blocking.", symbol)
+            return {
+                "proceed":  False,
+                "verdict":  "ABORT",
+                "reason":   reason[:140],
+                "warnings": [guardrails] if guardrails else [],
+                "analysis": (
+                    f"VERDICT: ABORT\nREASON: {reason}\n"
+                    "(Decision carried from stored weekly-plan AI analysis — no second AI call made.)"
+                ),
+            }
 
     # Live accounts get graduated tier thresholds — paper always uses standard
     if mode == "live":
@@ -271,13 +293,28 @@ Note: Tape is context only — it does not override position-sizing rules. A CAU
         if symbol_news else ""
     )
 
+    # Carry the weekly-plan verdict forward so this gate doesn't contradict it
+    stored_block = ""
+    if stored_analysis:
+        stored_decision = str(stored_analysis.get("decision", "")).upper()
+        if stored_decision in ("EXECUTE", "WAIT"):
+            stored_block = f"""
+--- PRIOR WEEKLY PLAN AI ANALYSIS (this week) ---
+Weekly decision : {stored_decision}
+Rationale       : {stored_analysis.get("rationale",     "")}
+Entry zone      : {stored_analysis.get("entry_zone",    "")}
+Exit strategy   : {stored_analysis.get("exit_strategy", "")}
+Guardrails      : {stored_analysis.get("guardrails",    "")}
+Note: The weekly analysis evaluated setup quality. Your task here is to confirm position sizing and flag any new developments (news). Do NOT downgrade an EXECUTE to ABORT without strong new evidence (e.g. adverse news, clear rule violation). A WAIT weekly verdict warrants WARN unless position sizing rules are broken.
+"""
+
     prompt = f"""You are a risk management AI for a Minervini SEPA swing trading system.
 Evaluate this proposed trade and respond in EXACTLY this format — no other text:
 
 VERDICT: <PROCEED|WARN|ABORT>
 REASON: <one sentence ≤20 words>
 WARNINGS: <comma-separated flags, or "none">
-{tape_block}
+{stored_block}{tape_block}
 --- PROPOSED TRADE ---
 Mode:            {mode.upper()}
 Symbol:          {symbol}
@@ -452,10 +489,12 @@ def analyze_slot_refill(
             sp = float(p.get("stop_price")  or 0)
             t1 = float(p.get("target1")     or 0)
             rr = round((t1 - ep) / (ep - sp), 2) if ep > sp > 0 and t1 > ep else "N/A"
+            weekly = p.get("weekly_ai_verdict", "")
+            weekly_tag = f"  weekly={weekly}" if weekly else ""
             pick_lines.append(
                 f"  {i}. {p['symbol']:6s}  score={p.get('score','?')}/8  "
                 f"signal={p.get('signal','?'):20s}  entry=${ep:.2f}  "
-                f"stop=${sp:.2f}  target=${t1:.2f}  R:R={rr}x  "
+                f"stop=${sp:.2f}  target=${t1:.2f}  R:R={rr}x{weekly_tag}  "
                 f"note: {str(p.get('rationale',''))[:80]}"
             )
         picks_block = "\n".join(pick_lines)
@@ -826,6 +865,36 @@ Symbols to include: {symbols_list}"""
     except Exception as exc:
         logger.error("analyze_picks_structured failed: %s", exc)
         raise
+
+
+def get_stored_weekly_plan_analysis(db: Session, symbol: str, mode: str) -> dict | None:
+    """
+    Return this week's stored ai_analysis from weekly_plan for the given symbol, or None.
+    Used by the pre-trade gate to avoid contradicting the deliberate weekly-plan AI verdict.
+    """
+    import json as _json
+    try:
+        row = db.execute(
+            text("""
+                SELECT ai_analysis
+                FROM weekly_plan
+                WHERE symbol    = :sym
+                  AND mode      = :mode
+                  AND ai_analysis IS NOT NULL
+                  AND week_start = (SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode)
+                LIMIT 1
+            """),
+            {"sym": symbol, "mode": mode},
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        data = row[0]
+        if isinstance(data, str):
+            data = _json.loads(data)
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        logger.debug("get_stored_weekly_plan_analysis failed (non-fatal): %s", exc)
+        return None
 
 
 def log_analysis(db: Session, trigger: str, symbol: str | None, analysis_text: str, mode: str, user_id: int = None):
