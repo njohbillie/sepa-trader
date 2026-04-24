@@ -773,7 +773,9 @@ Respond ONLY with a valid JSON array. No markdown fences, no explanation.
 Symbols to include: {symbols_list}"""
 
     try:
-        raw = _call_ai(db, prompt, max_tokens=1200, user_id=user_id)
+        # 300 tokens per pick is comfortable with news headlines included
+        max_tok = max(1500, len(pending) * 300)
+        raw = _call_ai(db, prompt, max_tokens=max_tok, user_id=user_id)
         if raw is None:
             raise ValueError("AI API key not configured.")
 
@@ -784,8 +786,18 @@ Symbols to include: {symbols_list}"""
             text = parts[1] if len(parts) > 1 else text
             if text.startswith("json"):
                 text = text[4:]
+        text = text.strip()
 
-        parsed: list = _json.loads(text.strip())
+        # Recover from truncated response: close the array if cut off mid-stream
+        if not text.endswith("]"):
+            last_complete = text.rfind("},")
+            if last_complete == -1:
+                last_complete = text.rfind("}")
+            if last_complete != -1:
+                text = text[: last_complete + 1] + "\n]"
+                logger.warning("analyze_picks_structured: response truncated — recovered %d chars", len(text))
+
+        parsed: list = _json.loads(text)
         if not isinstance(parsed, list):
             raise ValueError("AI did not return a JSON array")
 
