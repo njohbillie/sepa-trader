@@ -289,14 +289,14 @@ def run_monday_open(db: Session, mode: str | None = None):
         return
 
     held_symbols   = {p.symbol for p in positions}
-    mv_held, pb_held = _count_positions_by_type(db, mode, held_symbols)
+    mv_held, pb_held, rs_held = _count_positions_by_type(db, mode, held_symbols)
 
     mv_slots = min(max(0, mv_max - mv_held), max_pos - total_held)
     pb_slots = min(max(0, pb_max - pb_held), max_pos - total_held - mv_slots)
 
     logger.info(
-        "Monday open [%s]: held=%d (mv=%d pb=%d) | slots: mv=%d pb=%d | max_pos=%d",
-        mode, total_held, mv_held, pb_held, mv_slots, pb_slots, max_pos,
+        "Monday open [%s]: held=%d (mv=%d pb=%d rs=%d) | slots: mv=%d pb=%d | max_pos=%d",
+        mode, total_held, mv_held, pb_held, rs_held, mv_slots, pb_slots, max_pos,
     )
 
     # Fetch Minervini picks (screener_type = 'minervini' or 'both')
@@ -429,7 +429,18 @@ def check_post_close(db: Session, mode: str | None = None):
 
     logger.info("[%s] Detected closed positions: %s", mode, closed)
 
-    api_key   = get_setting(db, "claude_api_key", "")
+    # Resolve AI API key: prefer user-setting 'ai_api_key', fall back to legacy 'claude_api_key'
+    try:
+        from sqlalchemy import text as _t
+        admin_row = db.execute(_t("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1")).fetchone()
+        if admin_row:
+            from .database import get_all_user_settings as _gaus
+            _s = _gaus(db, admin_row[0])
+            api_key = _s.get("ai_api_key", "") or _s.get("claude_api_key", "") or get_setting(db, "claude_api_key", "")
+        else:
+            api_key = get_setting(db, "claude_api_key", "")
+    except Exception:
+        api_key = get_setting(db, "claude_api_key", "")
     # Use mode-specific auto_execute — live is fail-safe (default off)
     if mode == "live":
         auto_exec = get_setting(db, "live_auto_execute", "false").lower() == "true"
@@ -489,7 +500,7 @@ def _refill_slot(
 
     mv_max = int(get_setting(db, "mv_max_slots", "3") or "3")
     pb_max = int(get_setting(db, "pb_max_slots", "2") or "2")
-    mv_held, pb_held = _count_positions_by_type(db, mode, current_positions)
+    mv_held, pb_held, rs_held = _count_positions_by_type(db, mode, current_positions)
 
     try:
         acct         = alp.get_account(mode)
