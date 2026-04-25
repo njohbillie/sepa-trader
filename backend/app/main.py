@@ -152,9 +152,13 @@ def _run_migrations():
         # ── Add 2FA columns to users table (idempotent) ──────────────────────
         db.execute(text("""
             ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS totp_secret  VARCHAR(64),
+            ADD COLUMN IF NOT EXISTS totp_secret  TEXT,
             ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT false
         """))
+        # Widen pre-existing totp_secret column from VARCHAR(64) to TEXT so
+        # encrypted (Fernet ciphertext ~100+ chars) values fit. ALTER COLUMN TYPE
+        # is a no-op when the type already matches.
+        db.execute(text("ALTER TABLE users ALTER COLUMN totp_secret TYPE TEXT"))
 
         # ── Add screener_type to weekly_plan (phase-2) ────────────────────────
         db.execute(text("""

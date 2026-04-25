@@ -18,6 +18,7 @@ from ..auth import (
 )
 from ..database import get_db, get_current_user
 from ..config import settings as _cfg
+from ..crypto import encrypt as _enc, decrypt as _dec
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -133,7 +134,7 @@ def login_2fa(body: TwoFAVerifyBody, response: Response, db: Session = Depends(g
     if not row or not row[2]:
         raise HTTPException(401, "User not found or inactive")
 
-    if not verify_totp(row[1], body.code):
+    if not verify_totp(_dec(row[1] or ""), body.code):
         raise HTTPException(401, "Invalid 2FA code")
 
     _set_auth_cookies(response, user_id, row[0])
@@ -230,10 +231,13 @@ def setup_2fa(current_user: dict = Depends(get_current_user), db: Session = Depe
     secret = generate_totp_secret()
     db.execute(
         text("UPDATE users SET totp_secret = :s WHERE id = :id"),
-        {"s": secret, "id": current_user["id"]},
+        {"s": _enc(secret), "id": current_user["id"]},
     )
     db.commit()
     uri = get_totp_uri(secret, current_user["email"])
+    # Plain `secret` is returned ONCE here so the user can manually enter it
+    # into their authenticator app if QR scanning isn't available. The DB stores
+    # only the encrypted form.
     return {"secret": secret, "uri": uri}
 
 
@@ -254,7 +258,7 @@ def enable_2fa(
     if not row or not row[0]:
         raise HTTPException(400, "Run /2fa/setup first to generate a secret")
 
-    if not verify_totp(row[0], body.code):
+    if not verify_totp(_dec(row[0]), body.code):
         raise HTTPException(400, "Invalid code — check your authenticator app")
 
     db.execute(

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from ..database import (
     get_db, get_current_user,
     get_all_user_settings, set_user_setting,
+    PRIVATE_KEYS,
 )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -60,8 +61,20 @@ EDITABLE_KEYS = {
 
 @router.get("")
 def get_all(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Return merged settings: global defaults overlaid with user-specific overrides."""
-    return get_all_user_settings(db, current_user["id"])
+    """Return merged settings: global defaults overlaid with user-specific overrides.
+    Sensitive credentials are masked (••••XXXX) and a `has_<key>` boolean is added
+    so the UI knows whether a value is set without ever seeing it in plain text.
+    """
+    merged = get_all_user_settings(db, current_user["id"])
+    safe: dict = {}
+    for k, v in merged.items():
+        if k in PRIVATE_KEYS:
+            plain = v or ""
+            safe[k] = ("•" * 8 + plain[-4:]) if len(plain) > 4 else ("•" * len(plain))
+            safe[f"has_{k}"] = bool(plain)
+        else:
+            safe[k] = v
+    return safe
 
 
 class SettingUpdate(BaseModel):
@@ -79,5 +92,9 @@ def update(
         raise HTTPException(400, f"Key '{key}' is not editable")
     if key == "trading_mode" and body.value not in ("paper", "live"):
         raise HTTPException(400, "trading_mode must be 'paper' or 'live'")
+    # Skip masked placeholder writes — UI sends ••••XXXX when the user didn't
+    # touch the field; persisting that would corrupt the real credential.
+    if key in PRIVATE_KEYS and isinstance(body.value, str) and body.value.startswith("•"):
+        return {"key": key, "value": body.value, "skipped": True}
     set_user_setting(db, key, body.value, current_user["id"])
     return {"key": key, "value": body.value}

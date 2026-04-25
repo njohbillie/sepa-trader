@@ -4,6 +4,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 
 from .config import settings
+from .crypto import encrypt as _enc, decrypt as _dec
 
 engine       = create_engine(settings.database_url.replace("postgresql://", "postgresql+psycopg2://"))
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
@@ -20,15 +21,27 @@ def get_db():
 
 # ── Global settings (system-level, used by scheduler/background jobs) ─────────
 
+# Sensitive global keys — encrypted at rest, decrypted transparently on read.
+_GLOBAL_PRIVATE_KEYS: frozenset[str] = frozenset({
+    "webhook_secret",
+})
+
+
 def get_setting(db, key: str, default: str = "") -> str:
     row = db.execute(text("SELECT value FROM settings WHERE key = :k"), {"k": key}).fetchone()
-    return row[0] if row else default
+    if not row:
+        return default
+    val = row[0]
+    if key in _GLOBAL_PRIVATE_KEYS and val:
+        val = _dec(val)
+    return val
 
 
 def set_setting(db, key: str, value: str):
+    stored = _enc(value) if (key in _GLOBAL_PRIVATE_KEYS and value) else value
     db.execute(
         text("INSERT INTO settings (key, value) VALUES (:k, :v) ON CONFLICT (key) DO UPDATE SET value = :v"),
-        {"k": key, "v": value},
+        {"k": key, "v": stored},
     )
     db.commit()
 
@@ -59,6 +72,7 @@ _PRIVATE_KEYS: frozenset[str] = frozenset({
 def get_user_setting(db, key: str, default: str = "", user_id: int = None) -> str:
     """Return user-specific setting.
     Private keys never fall back to global — they must be set explicitly per user.
+    Sensitive values are decrypted transparently before being returned.
     """
     if user_id:
         row = db.execute(
@@ -66,7 +80,10 @@ def get_user_setting(db, key: str, default: str = "", user_id: int = None) -> st
             {"k": key, "uid": user_id},
         ).fetchone()
         if row:
-            return row[0]
+            val = row[0]
+            if key in _PRIVATE_KEYS and val:
+                val = _dec(val)
+            return val
     # Private keys have no global fallback — return the supplied default
     if key in _PRIVATE_KEYS:
         return default
@@ -77,12 +94,14 @@ def set_user_setting(db, key: str, value: str, user_id: int):
     # Strip whitespace from credential keys so copy-paste artefacts don't cause 401s
     if key in _PRIVATE_KEYS and isinstance(value, str):
         value = value.strip()
+    # Encrypt sensitive keys at rest
+    stored = _enc(value) if (key in _PRIVATE_KEYS and value) else value
     db.execute(
         text("""
             INSERT INTO user_settings (user_id, key, value) VALUES (:uid, :k, :v)
             ON CONFLICT (user_id, key) DO UPDATE SET value = :v
         """),
-        {"uid": user_id, "k": key, "v": value},
+        {"uid": user_id, "k": key, "v": stored},
     )
     db.commit()
 
@@ -91,19 +110,32 @@ def get_all_user_settings(db, user_id: int) -> dict:
     """Return merged dict: global defaults overlaid with user overrides.
     Private/sensitive keys are excluded from the global layer — they must
     be configured explicitly per user and are blank for new accounts.
+    Sensitive values are decrypted transparently before being returned.
     """
     global_rows = db.execute(text("SELECT key, value FROM settings")).fetchall()
-    # Strip private keys so they never bleed from global into any user's view
-    merged = {r[0]: r[1] for r in global_rows if r[0] not in _PRIVATE_KEYS}
+    merged: dict[str, str] = {}
+    for k, v in global_rows:
+        if k in _PRIVATE_KEYS:
+            continue  # never bleed from global into any user's view
+        if k in _GLOBAL_PRIVATE_KEYS and v:
+            v = _dec(v)
+        merged[k] = v
 
     user_rows = db.execute(
         text("SELECT key, value FROM user_settings WHERE user_id = :uid"),
         {"uid": user_id},
     ).fetchall()
-    for r in user_rows:
-        merged[r[0]] = r[1]
+    for k, v in user_rows:
+        if k in _PRIVATE_KEYS and v:
+            v = _dec(v)
+        merged[k] = v
 
     return merged
+
+
+# Public re-export so other modules (e.g. routes/settings.py masking) can
+# discover which keys must never be returned in plain text.
+PRIVATE_KEYS: frozenset[str] = _PRIVATE_KEYS
 
 
 # ── Auth dependencies ─────────────────────────────────────────────────────────
