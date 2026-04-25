@@ -23,6 +23,7 @@ from ..database import get_db, get_current_user, get_all_user_settings
 from ..config import settings as global_settings
 from .. import alpaca_client as alp
 from ..utils import sf as _sf
+from ..crypto import encrypt as _enc, decrypt as _dec
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
@@ -47,15 +48,27 @@ def _get_strategy_config(db: Session, user_id: int, strategy_name: str) -> dict:
             "alpaca_paper_secret": "",
             "alpaca_live_key":     "",
             "alpaca_live_secret":  "",
+            "has_paper_keys":      False,
+            "has_live_keys":       False,
             "settings":            {},
         }
     d = dict(row._mapping)
     if isinstance(d.get("settings"), str):
         d["settings"] = json.loads(d["settings"])
-    # Mask secrets in response
-    for k in ("alpaca_paper_key", "alpaca_paper_secret", "alpaca_live_key", "alpaca_live_secret"):
-        v = d.get(k) or ""
-        d[k] = ("•" * 8 + v[-4:]) if len(v) > 4 else ("•" * len(v))
+    # Decrypt, compute presence flags, then mask for the response
+    paper_key    = _dec(d.get("alpaca_paper_key")    or "")
+    paper_secret = _dec(d.get("alpaca_paper_secret") or "")
+    live_key     = _dec(d.get("alpaca_live_key")     or "")
+    live_secret  = _dec(d.get("alpaca_live_secret")  or "")
+    d["has_paper_keys"] = bool(paper_key and paper_secret)
+    d["has_live_keys"]  = bool(live_key  and live_secret)
+    for field, plain in (
+        ("alpaca_paper_key",    paper_key),
+        ("alpaca_paper_secret", paper_secret),
+        ("alpaca_live_key",     live_key),
+        ("alpaca_live_secret",  live_secret),
+    ):
+        d[field] = ("•" * 8 + plain[-4:]) if len(plain) > 4 else ("•" * len(plain))
     return d
 
 
@@ -73,15 +86,15 @@ def _resolve_strategy_alpaca_client(db: Session, user_id: int, strategy_name: st
     user_settings = get_all_user_settings(db, user_id)
 
     if mode == "paper":
-        key    = (row and row[0]) or user_settings.get("alpaca_paper_key", "")
-        secret = (row and row[1]) or user_settings.get("alpaca_paper_secret", "")
+        key    = _dec((row and row[0]) or "") or user_settings.get("alpaca_paper_key", "")
+        secret = _dec((row and row[1]) or "") or user_settings.get("alpaca_paper_secret", "")
         if is_admin:
             key    = key    or global_settings.alpaca_paper_key
             secret = secret or global_settings.alpaca_paper_secret
         paper = True
     else:
-        key    = (row and row[2]) or user_settings.get("alpaca_live_key", "")
-        secret = (row and row[3]) or user_settings.get("alpaca_live_secret", "")
+        key    = _dec((row and row[2]) or "") or user_settings.get("alpaca_live_key", "")
+        secret = _dec((row and row[3]) or "") or user_settings.get("alpaca_live_secret", "")
         if is_admin:
             key    = key    or global_settings.alpaca_live_key
             secret = secret or global_settings.alpaca_live_secret
@@ -105,8 +118,8 @@ def _dm_has_dedicated_keys(db: Session, user_id: int, mode: str) -> bool:
     if not row:
         return False
     if mode == "paper":
-        return bool(row[0] and row[1])
-    return bool(row[2] and row[3])
+        return bool(_dec(row[0] or "") and _dec(row[1] or ""))
+    return bool(_dec(row[2] or "") and _dec(row[3] or ""))
 
 
 def _save_signal(db: Session, user_id: int, strategy_name: str,
@@ -216,7 +229,7 @@ def evaluate_dual_momentum(
     # 2 — Market environment
     market_env = env_assess()
 
-    # 3 — Current Alpaca position (best-effort)
+    # 3 — Current Alpaca position (required — fail loudly so the user knows)
     portfolio: dict = {}
     try:
         client   = _resolve_strategy_alpaca_client(db, uid, STRATEGY_DM, mode, is_admin)
@@ -228,8 +241,11 @@ def evaluate_dual_momentum(
             }
             for p in positions
         }
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.warning("evaluate: could not fetch positions: %s", exc)
+        logger.error("evaluate: portfolio fetch failed: %s", exc)
+        raise HTTPException(502, f"Could not fetch Alpaca portfolio: {str(exc)[:200]}")
 
     # 4 — AI decision
     ai_decision = ai_decide(
@@ -345,21 +361,19 @@ def get_dm_history(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return signal history filtered to the user's current global mode."""
-    uid           = current_user["id"]
-    user_settings = get_all_user_settings(db, uid)
-    mode          = user_settings.get("trading_mode", "paper")
+    """Return signal history across all modes (paper + live)."""
+    uid = current_user["id"]
 
     rows = db.execute(
         text("""
             SELECT id, recommended_symbol, action, reasoning,
                    ai_verdict, ai_reasoning, mode, executed, created_at
             FROM strategy_signals
-            WHERE user_id = :uid AND strategy_name = :name AND mode = :mode
+            WHERE user_id = :uid AND strategy_name = :name
             ORDER BY created_at DESC
             LIMIT :l
         """),
-        {"uid": uid, "name": STRATEGY_DM, "l": limit, "mode": mode},
+        {"uid": uid, "name": STRATEGY_DM, "l": limit},
     ).fetchall()
     return [dict(r._mapping) for r in rows]
 
@@ -377,7 +391,6 @@ def get_dm_config(
 class DmConfigUpdate(BaseModel):
     is_active:               bool  | None = None
     auto_execute:            bool  | None = None
-    trading_mode:            str   | None = None
     alpaca_paper_key:        str   | None = None
     alpaca_paper_secret:     str   | None = None
     alpaca_live_key:         str   | None = None
@@ -396,8 +409,6 @@ def update_dm_config(
     db: Session = Depends(get_db),
 ):
     uid = current_user["id"]
-    if body.trading_mode and body.trading_mode not in ("paper", "live"):
-        raise HTTPException(400, "trading_mode must be 'paper' or 'live'")
 
     # Upsert row
     db.execute(
@@ -411,11 +422,44 @@ def update_dm_config(
     updates = []
     params  = {"uid": uid, "name": STRATEGY_DM}
 
-    for field in ("is_active", "auto_execute", "trading_mode",
-                  "alpaca_paper_key", "alpaca_paper_secret",
+    # Collect new plain-text key values (skip masked placeholders)
+    new_keys: dict[str, str] = {}
+    for field in ("alpaca_paper_key", "alpaca_paper_secret",
                   "alpaca_live_key",  "alpaca_live_secret"):
         val = getattr(body, field)
-        # Skip masked placeholder values
+        if val is not None and not (isinstance(val, str) and val.startswith("•")):
+            new_keys[field] = val.strip()
+
+    # Validate new credentials against Alpaca API before saving (Bug #2)
+    if new_keys:
+        paper_key    = new_keys.get("alpaca_paper_key")
+        paper_secret = new_keys.get("alpaca_paper_secret")
+        live_key     = new_keys.get("alpaca_live_key")
+        live_secret  = new_keys.get("alpaca_live_secret")
+
+        # Validate paper pair if both sides are provided
+        if paper_key and paper_secret:
+            try:
+                test_client = alp.get_client_for_keys(paper_key, paper_secret, paper=True)
+                test_client.get_account()
+            except Exception as exc:
+                raise HTTPException(400, f"Paper Alpaca credentials invalid: {str(exc)[:200]}")
+
+        # Validate live pair if both sides are provided
+        if live_key and live_secret:
+            try:
+                test_client = alp.get_client_for_keys(live_key, live_secret, paper=False)
+                test_client.get_account()
+            except Exception as exc:
+                raise HTTPException(400, f"Live Alpaca credentials invalid: {str(exc)[:200]}")
+
+        # Encrypt before storing
+        for field, plain in new_keys.items():
+            updates.append(f"{field} = :{field}")
+            params[field] = _enc(plain) if plain else ""
+
+    for field in ("is_active", "auto_execute"):
+        val = getattr(body, field)
         if val is not None and not (isinstance(val, str) and val.startswith("•")):
             updates.append(f"{field} = :{field}")
             params[field] = val

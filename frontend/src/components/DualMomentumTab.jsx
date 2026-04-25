@@ -333,10 +333,8 @@ function StrategySettings({ config, onSave, saving, globalMode = 'paper' }) {
   })
 
   // Detect if dedicated keys are configured for the GLOBAL mode
-  const hasDedicatedKeys = form && (
-    globalMode === 'paper'
-      ? (form.alpaca_paper_key && form.alpaca_paper_key.includes('•'))
-      : (form.alpaca_live_key  && form.alpaca_live_key.includes('•'))
+  const hasDedicatedKeys = config && (
+    globalMode === 'paper' ? config.has_paper_keys : config.has_live_keys
   )
   const sharedAccountWarning = form?.auto_execute && !hasDedicatedKeys
 
@@ -569,11 +567,9 @@ export default function DualMomentumTab() {
   const globalMode = accountMeta?.mode ?? 'paper'
 
   // Hard-block: DM requires dedicated Alpaca keys — no sharing with Minervini account
-  const hasDedicatedKeys = config && (() => {
-    return globalMode === 'paper'
-      ? (config.alpaca_paper_key && config.alpaca_paper_key.includes('•'))
-      : (config.alpaca_live_key  && config.alpaca_live_key.includes('•'))
-  })()
+  const hasDedicatedKeys = config && (
+    globalMode === 'paper' ? config.has_paper_keys : config.has_live_keys
+  )
   const keysRequired = config && !hasDedicatedKeys
 
   return (

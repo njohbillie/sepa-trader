@@ -487,8 +487,31 @@ async def _dm_watchdog():
                 continue
 
             reason = cb_reason if cb_triggered else f"{frequency} schedule"
+
+            # Always follow the user's global trading mode
+            mode = get_user_setting(db, "trading_mode", "paper", user_id)
+
+            # Bug #6: check dedicated keys BEFORE running evaluation
+            from .routes.strategies import _dm_has_dedicated_keys
+            if not _dm_has_dedicated_keys(db, user_id, mode):
+                logger.warning(
+                    "DM watchdog: skipping eval for user %d — no dedicated Alpaca keys for mode=%s",
+                    user_id, mode,
+                )
+                continue
+
             if cb_triggered:
                 logger.warning("DM circuit breaker triggered for user %d: %s", user_id, cb_reason)
+                # Bug #3: notify via Telegram on circuit breaker
+                try:
+                    from . import telegram_alerts as tg
+                    await tg.send(
+                        f"*DM Circuit Breaker*\n{cb_reason}\n"
+                        f"Triggering out-of-schedule evaluation for user {user_id}.",
+                        level="URGENT",
+                    )
+                except Exception as tg_exc:
+                    logger.warning("DM circuit breaker Telegram notify failed: %s", tg_exc)
             else:
                 logger.info("DM eval triggered for user %d: %s", user_id, reason)
 
@@ -503,11 +526,28 @@ async def _dm_watchdog():
                 from .strategies.ai_strategist import decide    as ai_decide
                 from .routes.strategies        import _save_signal, _execute_signal_bg, STRATEGY_DM
 
-                # Always follow the user's global trading mode
-                mode = get_user_setting(db, "trading_mode", "paper", user_id)
-
                 signal      = dm_evaluate()
                 market_env  = env_assess()
+
+                # Fetch portfolio for AI context (best-effort — empty dict if unavailable)
+                portfolio: dict = {}
+                try:
+                    from .routes.strategies import _resolve_strategy_alpaca_client
+                    is_admin_row = db.execute(
+                        text("SELECT role FROM users WHERE id = :id"), {"id": user_id}
+                    ).scalar()
+                    client = _resolve_strategy_alpaca_client(
+                        db, user_id, STRATEGY_DM, mode, is_admin_row == "admin"
+                    )
+                    from .utils import sf as _sf
+                    for p in client.get_all_positions():
+                        portfolio[p.symbol] = {
+                            "qty":           _sf(p.qty, 0.0),
+                            "unrealized_pl": _sf(p.unrealized_pl, 0.0),
+                        }
+                except Exception as pf_exc:
+                    logger.warning("DM watchdog: portfolio fetch failed: %s", pf_exc)
+
                 ai_decision = ai_decide(
                     db=db,
                     market_env=market_env,
@@ -517,11 +557,10 @@ async def _dm_watchdog():
                         "action":             "BUY",
                         "reasoning":          signal["reasoning"],
                     }],
-                    portfolio={},
+                    portfolio=portfolio,
                     user_id=user_id,
                 )
 
-                # Tag the signal with what triggered it
                 signal["trigger"] = reason
                 _save_signal(db, user_id, STRATEGY_DM, signal, ai_decision, mode)
 
@@ -530,14 +569,7 @@ async def _dm_watchdog():
                             signal.get("recommended_symbol"), reason)
 
                 if auto_execute and ai_decision.get("decision") == "EXECUTE":
-                    from .routes.strategies import _dm_has_dedicated_keys
-                    if _dm_has_dedicated_keys(db, user_id, mode):
-                        _execute_signal_bg(user_id, STRATEGY_DM, signal["recommended_symbol"], mode)
-                    else:
-                        logger.warning(
-                            "DM auto-execute blocked for user %d: no dedicated Alpaca keys set for mode=%s",
-                            user_id, mode,
-                        )
+                    _execute_signal_bg(user_id, STRATEGY_DM, signal["recommended_symbol"], mode)
 
             except Exception as exc:
                 logger.error("DM eval failed for user %d: %s", user_id, exc)
