@@ -94,29 +94,71 @@ def _reconcile_sync(mode: str) -> None:
 
 
 async def _start_one(mode: str) -> None:
+    """
+    Connect-and-consume loop with exponential backoff.
+
+    We do NOT use TradingStream._run_forever because it retries with a 10ms
+    sleep on failure. Alpaca rate-limits aggressive reconnects (HTTP 429) and
+    only allows ONE concurrent trade_updates WS per account, so a stale
+    connection from a prior process needs time to expire server-side.
+    """
     creds = _resolve_creds(mode)
     if not creds:
         logger.info("trade_stream[%s]: no credentials — skipping WS start.", mode)
         return
 
     key, sec = creds
-    stream = TradingStream(api_key=key, secret_key=sec, paper=(mode == "paper"))
-    stream.subscribe_trade_updates(_make_handler(mode))
-    _streams[mode] = stream
+    backoff = 5.0
+    BACKOFF_MAX = 120.0
+    handler = _make_handler(mode)
 
-    logger.info("trade_stream[%s]: starting WebSocket listener…", mode)
-    try:
-        # _run_forever has its own reconnect loop on websockets exceptions.
-        await stream._run_forever()
-    except asyncio.CancelledError:
-        logger.info("trade_stream[%s]: cancelled.", mode)
+    while True:
+        stream = TradingStream(api_key=key, secret_key=sec, paper=(mode == "paper"))
+        stream.subscribe_trade_updates(handler)
+        # _consume reads from this loop's queue, so set _loop ourselves.
+        stream._loop = asyncio.get_running_loop()
+        _streams[mode] = stream
+
         try:
-            await stream.close()
-        except Exception:
-            pass
-        raise
-    except Exception as exc:
-        logger.error("trade_stream[%s]: terminated unexpectedly — %s", mode, exc, exc_info=True)
+            await stream._start_ws()
+            logger.info("trade_stream[%s]: connected.", mode)
+            backoff = 5.0  # reset on success
+            await stream._consume()
+            # _consume returns cleanly only on stop_stream_queue signal.
+            return
+        except asyncio.CancelledError:
+            logger.info("trade_stream[%s]: cancelled.", mode)
+            try:
+                await stream.close()
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            msg = str(exc)
+            # 429 = too many connections (often a stale WS from prior process).
+            # Push backoff harder and warn loudly.
+            if "429" in msg:
+                backoff = max(backoff, 60.0)
+                logger.warning(
+                    "trade_stream[%s]: HTTP 429 (rate-limited / stale connection?). "
+                    "Sleeping %.0fs before retry.",
+                    mode, backoff,
+                )
+            else:
+                logger.warning(
+                    "trade_stream[%s]: connection error — %s. Retrying in %.0fs.",
+                    mode, msg, backoff,
+                )
+            try:
+                await stream.close()
+            except Exception:
+                pass
+
+            try:
+                await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                raise
+            backoff = min(backoff * 2, BACKOFF_MAX)
 
 
 def start_trade_streams() -> None:
