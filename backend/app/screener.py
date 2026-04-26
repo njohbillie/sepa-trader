@@ -230,9 +230,11 @@ def run_screener(db: Session, mode: str = None, user_id: int = None, account_val
     ema20_pct       = float(_s("screener_ema20_pct",     "2.0") or "2.0")
     ema50_pct       = float(_s("screener_ema50_pct",     "3.0") or "3.0")
 
-    # Sector exclusion — reuse the same GICS→TV name resolver as the RS screener
+    # Sector exclusion — Minervini-specific. Falls back to the legacy
+    # `screener_excluded_sectors` key so existing settings keep working.
     from .rs_screener import _resolve_excluded as _rs_resolve
-    _excluded_raw = [s.strip() for s in _s("screener_excluded_sectors", "").split(",") if s.strip()]
+    _excluded_csv = _s("mv_excluded_sectors", "") or _s("screener_excluded_sectors", "")
+    _excluded_raw = [s.strip() for s in _excluded_csv.split(",") if s.strip()]
     excluded_sectors = _rs_resolve(_excluded_raw) if _excluded_raw else set()
 
     if account_value is None:
