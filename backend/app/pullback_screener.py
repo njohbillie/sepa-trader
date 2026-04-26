@@ -896,7 +896,11 @@ def _score_candidates(
                         continue
                 else:
                     days_to_earnings = (next_earn - today).days
-                    if 0 <= days_to_earnings < cfg["earnings_days_min"]:
+                    # Block when next earnings is within the buffer window.
+                    # Negative values (stale/past dates from upstream) are also
+                    # blocked — a "next earnings" date that's already in the
+                    # past means the data is unreliable.
+                    if days_to_earnings < cfg["earnings_days_min"]:
                         logger.debug(
                             "Pullback: %s skipped — earnings in %d days (min=%d)",
                             sym, days_to_earnings, cfg["earnings_days_min"],

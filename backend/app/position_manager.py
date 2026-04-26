@@ -482,11 +482,11 @@ def check_post_close(db: Session, mode: str | None = None):
     ).fetchone()
     prev = set(snap_row[0].split(",")) if snap_row and snap_row[0] else set()
 
-    set_setting(db, snapshot_key, ",".join(sorted(current)))
-    db.commit()
-
     closed = prev - current
     if not closed:
+        # No closures — safe to advance the snapshot now.
+        set_setting(db, snapshot_key, ",".join(sorted(current)))
+        db.commit()
         return
 
     logger.info("[%s] Detected closed positions: %s", mode, closed)
@@ -539,6 +539,12 @@ def check_post_close(db: Session, mode: str | None = None):
                 current = {p.symbol for p in alp.get_positions(mode)}
             except Exception:
                 pass
+
+    # Advance the snapshot only AFTER the closed-position loop finishes.
+    # If we crash mid-loop, the next run sees the unchanged `prev` and
+    # re-detects the still-pending closures instead of silently losing them.
+    set_setting(db, snapshot_key, ",".join(sorted(current)))
+    db.commit()
 
 
 def _refill_slot(
