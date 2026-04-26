@@ -328,6 +328,25 @@ async def lifespan(app: FastAPI):
         logger.warning("=" * 60)
     _run_migrations()
     start_scheduler()
+
+    # Startup reconciliation: catch positions held in Alpaca that are missing
+    # from the DB after a mid-day restart, before the next monitor cycle (up
+    # to 30 min away). Failures are logged but never block startup.
+    try:
+        from .database import SessionLocal
+        from .position_manager import reconcile_db_vs_alpaca
+        _db = SessionLocal()
+        try:
+            for _mode in ("paper", "live"):
+                try:
+                    reconcile_db_vs_alpaca(_db, mode=_mode)
+                except Exception as exc:
+                    logger.warning("Startup reconciliation [%s] failed: %s", _mode, exc)
+        finally:
+            _db.close()
+    except Exception as exc:
+        logger.warning("Startup reconciliation skipped: %s", exc)
+
     yield
     stop_scheduler()
 

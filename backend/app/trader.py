@@ -8,12 +8,16 @@ Auto-execution engine: fires trades based on SEPA signals.
 """
 import asyncio
 import logging
+from datetime import datetime
+import pytz
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from . import alpaca_client as alp
 from .sepa_analyzer import analyze
-from .database import get_setting, get_all_user_settings
+from .database import get_setting, set_setting, get_all_user_settings
 from . import telegram_alerts as tg
+
+_ET = pytz.timezone("America/New_York")
 
 logger = logging.getLogger(__name__)
 
@@ -766,23 +770,41 @@ async def run_monitor(db: Session, user_id: int | None = None, mode: str | None 
         # watchlist) when day_pnl breaches the configured threshold. Existing
         # exits/trailing stops still run; we only stop adding risk.
         # Setting `daily_drawdown_halt_pct` (default 5.0); 0 disables the check.
+        # Halt latches for the ET calendar day in `drawdown_halt_<mode>_date`
+        # so a mid-day restart doesn't forget that we already tripped.
         entries_halted = False
         try:
             halt_pct = float(get_setting(db, "daily_drawdown_halt_pct", "5.0") or "0")
         except (TypeError, ValueError):
             halt_pct = 5.0
+
+        today_et   = datetime.now(_ET).strftime("%Y-%m-%d")
+        halt_key   = f"drawdown_halt_{mode}_date"
+        prior_halt = get_setting(db, halt_key, "")
+
+        if halt_pct > 0 and prior_halt == today_et:
+            entries_halted = True
+            logger.warning(
+                "DAILY DRAWDOWN HALT [%s]: previously tripped today (%s) — entries still blocked.",
+                mode, today_et,
+            )
+
         last_eq = float(getattr(acct, "last_equity", 0) or 0)
-        if halt_pct > 0 and last_eq > 0:
+        if not entries_halted and halt_pct > 0 and last_eq > 0:
             day_pnl_pct = day_pnl / last_eq * 100
             if day_pnl_pct <= -halt_pct:
                 entries_halted = True
+                try:
+                    set_setting(db, halt_key, today_et)
+                    db.commit()
+                except Exception:
+                    db.rollback()
                 logger.warning(
                     "DAILY DRAWDOWN HALT [%s]: day_pnl=%.2f%% breached -%.2f%% threshold — "
                     "blocking new entries (exits still run).",
                     mode, day_pnl_pct, halt_pct,
                 )
                 try:
-                    from . import telegram_alerts as tg
                     tg.send_sync(
                         f"*DAILY DRAWDOWN HALT* [{mode.upper()}]\n\n"
                         f"Day P&L: `{day_pnl_pct:.2f}%` (threshold `-{halt_pct:.2f}%`)\n"
