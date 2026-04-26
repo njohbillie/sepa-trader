@@ -592,6 +592,17 @@ def _save_plan(db: Session, rows: list[dict], week_start: str, mode: str, user_i
     except Exception:
         pass
 
+    # Also treat any currently-open Alpaca position as EXECUTED so the
+    # screener never re-queues a name we already hold (e.g. position opened
+    # last week, plan rebuilt today). Best-effort — if Alpaca is unreachable
+    # we still save the plan; fill_open_slots will reconcile on next monitor.
+    try:
+        from . import alpaca_client as alp
+        held = {p.symbol for p in alp.get_positions(mode)}
+        already_executed |= held
+    except Exception as exc:
+        logger.warning("_save_plan: could not fetch Alpaca positions for held-guard: %s", exc)
+
     db.execute(
         text("DELETE FROM weekly_plan WHERE week_start = :w AND mode = :m AND user_id IS NOT DISTINCT FROM :uid"),
         {"w": week_start, "m": mode, "uid": user_id},
