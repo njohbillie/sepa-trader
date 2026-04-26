@@ -8,6 +8,7 @@ Live accounts automatically apply graduated conservative filters based on
 account size — no manual settings changes needed as the account grows.
 """
 import logging
+import statistics
 from datetime import date, timedelta
 
 from sqlalchemy import text
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from .tv_analyzer import batch_analyze
 from .database import get_setting, set_setting, get_user_setting, set_user_setting
+from . import telegram_alerts as tg
 
 logger = logging.getLogger(__name__)
 
@@ -224,11 +226,39 @@ def run_screener(db: Session, mode: str = None, user_id: int = None, account_val
     errors    = sum(1 for r in results_map.values() if r.get("signal") in ("ERROR", "INSUFFICIENT_DATA"))
     top_score = all_scored[0]["score"] if all_scored else 0
 
-    # Adaptive threshold — if user/tier set a floor, respect it.
-    # Otherwise step down until 5+ candidates found.
-    if min_score_floor > 0:
+    # Data-quality guard: if the median score across the whole universe is too
+    # low, TV data is likely degraded (or the market is in a deep correction
+    # where no SEPA setups exist). Either way, walking the floor down to 3
+    # would emit garbage picks. Abort with empty plan + alert instead.
+    median_score = statistics.median(c["score"] for c in all_scored) if all_scored else 0
+    DEGRADED_MEDIAN_THRESHOLD = 4
+    degraded = bool(all_scored) and median_score < DEGRADED_MEDIAN_THRESHOLD
+
+    if degraded:
+        msg = (
+            f"Minervini screener ({mode}/{tier_label}): aborting — median score "
+            f"{median_score:.1f} below {DEGRADED_MEDIAN_THRESHOLD} across "
+            f"{len(all_scored)} scored / {len(universe)} universe "
+            f"(errors {errors}). Likely degraded TV data or deep correction; "
+            f"emitting empty plan instead of low-quality picks."
+        )
+        logger.warning(msg)
+        _log_alert(db, "WARN", msg)
+        try:
+            tg.alert_system_error_sync(
+                f"minervini_screener:{mode}",
+                f"Aborted: median score {median_score:.1f} (<{DEGRADED_MEDIAN_THRESHOLD}). "
+                f"scored={len(all_scored)}, errors={errors}/{len(universe)}.",
+                level="WARNING",
+            )
+        except Exception:
+            pass
+        candidates = []
+    elif min_score_floor > 0:
+        # Adaptive threshold — if user/tier set a floor, respect it.
         candidates = [c for c in all_scored if c["score"] >= min_score_floor]
     else:
+        # Otherwise step down until 5+ candidates found.
         candidates = []
         for min_score in (6, 5, 4, 3):
             candidates = [c for c in all_scored if c["score"] >= min_score]

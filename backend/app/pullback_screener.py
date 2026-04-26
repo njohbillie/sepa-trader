@@ -200,14 +200,14 @@ def run_pullback_screener(
                 "Saved TV screener '%s' failed — falling back to server-side filter scan.",
                 tv_screener_name,
             )
-            candidates = _tv_filter_serverside(cfg)
+            candidates = _adaptive_ema_serverside(cfg)
     else:
         # Option A: send filter conditions to TV's scanner, let TV do the filtering
         logger.info(
             "Pullback screener [Option A]: server-side TV filter scan (universe=%d symbols)",
             len(universe),
         )
-        candidates = _tv_filter_serverside(cfg)
+        candidates = _adaptive_ema_serverside(cfg)
 
     logger.info("Pullback screener: %d candidates after TV filter", len(candidates))
 
@@ -493,6 +493,45 @@ def _local_refinement(sym: str, v: dict, cfg: dict) -> dict | None:
 
 
 # ── Pass 1 Option A: server-side TV filter scan ───────────────────────────────
+
+# Minimum candidates pass-1 should produce before we consider the EMA ladder
+# "too tight." If TV returns fewer than this with all 4 EMA toggles on, the
+# higher EMAs (100/200) are progressively dropped. The two short-MA conditions
+# (price > EMA20, EMA20 > EMA50) are core to the pullback thesis and never relaxed.
+_PB_ADAPTIVE_MIN_CANDIDATES = 5
+
+
+def _adaptive_ema_serverside(cfg: dict) -> list[dict]:
+    """
+    Run server-side TV filter, progressively relaxing the higher EMA-ladder
+    rungs (EMA100>EMA200, then EMA50>EMA100) when the result set is too small.
+    The short-MA conditions (price>EMA20, EMA20>EMA50) are never relaxed —
+    relaxing them would defeat the "pullback to short MA" thesis.
+    """
+    candidates = _tv_filter_serverside(cfg)
+
+    # Relaxation only kicks in when (a) result is sparse, and (b) at least one
+    # of the higher rungs is currently on. Otherwise nothing to relax.
+    relax_steps = [
+        ("ema100_above_ema200", "EMA100>EMA200"),
+        ("ema50_above_ema100",  "EMA50>EMA100"),
+    ]
+    relaxed_cfg = dict(cfg)
+    for key, label in relax_steps:
+        if len(candidates) >= _PB_ADAPTIVE_MIN_CANDIDATES:
+            break
+        if not relaxed_cfg.get(key):
+            continue
+        relaxed_cfg = dict(relaxed_cfg)
+        relaxed_cfg[key] = False
+        logger.warning(
+            "Pullback screener: only %d candidates — relaxing %s and retrying.",
+            len(candidates), label,
+        )
+        candidates = _tv_filter_serverside(relaxed_cfg)
+
+    return candidates
+
 
 def _tv_filter_serverside(cfg: dict) -> list[dict]:
     """
