@@ -244,6 +244,7 @@ const SECTIONS = [
       { key: 'monitor_enabled',          label: 'Monitor enabled (auto-place exits & manage positions)', type: 'toggle', defaultValue: 'true' },
       { key: 'monitor_interval_minutes', label: 'Monitor check frequency', type: 'select',
         options: [
+          { value: '1',  label: 'Every 1 minute (fastest reactions, max API load)' },
           { value: '5',  label: 'Every 5 minutes' },
           { value: '10', label: 'Every 10 minutes' },
           { value: '15', label: 'Every 15 minutes' },
