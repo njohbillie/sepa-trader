@@ -502,6 +502,88 @@ def _gate(
         return True
 
 
+# ── Partial-fill reconciliation ───────────────────────────────────────────────
+
+def _reconcile_partial_fills(db: Session, positions, mode: str) -> None:
+    """Sync stale planned qty against actual filled qty.
+
+    `weekly_plan.position_size` is set at screener time and `trade_log.qty`
+    captures the requested size. Neither is updated when a bracket entry
+    partial-fills, so reporting drifts from reality. Bracket exit legs
+    auto-resize to filled qty in Alpaca, so this is a reporting-fix, not
+    a risk-fix — but stale numbers also leak into the AI gate's portfolio
+    context and the cash-buffer calculation on the next monitor cycle.
+    """
+    from sqlalchemy import text as _text
+    from . import telegram_alerts as tg
+
+    for pos in positions:
+        sym       = pos.symbol
+        actual_qty = float(getattr(pos, "qty", 0) or 0)
+        if actual_qty <= 0:
+            continue
+
+        try:
+            # Latest weekly_plan row for this symbol+mode
+            wp = db.execute(
+                _text("""
+                    SELECT id, position_size, entry_price
+                    FROM weekly_plan
+                    WHERE symbol = :sym AND mode = :mode
+                      AND week_start = (
+                          SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
+                      )
+                """),
+                {"sym": sym, "mode": mode},
+            ).fetchone()
+            if not wp or wp[1] is None:
+                continue
+
+            planned = int(wp[1])
+            if planned <= 0 or planned == int(actual_qty):
+                continue
+
+            db.execute(
+                _text("UPDATE weekly_plan SET position_size = :q WHERE id = :id"),
+                {"q": int(actual_qty), "id": wp[0]},
+            )
+
+            # Sync the most-recent BUY trade_log entry too
+            db.execute(
+                _text("""
+                    UPDATE trade_log SET qty = :q
+                    WHERE id = (
+                        SELECT id FROM trade_log
+                        WHERE symbol = :sym AND mode = :mode AND action = 'BUY'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    )
+                """),
+                {"q": actual_qty, "sym": sym, "mode": mode},
+            )
+            db.commit()
+
+            diff_pct = abs(actual_qty - planned) / planned * 100
+            logger.info(
+                "Reconciled %s [%s]: planned=%d actual=%.0f (%.1f%% diff)",
+                sym, mode, planned, actual_qty, diff_pct,
+            )
+            # Alert on material partial fill — stale-by-a-share isn't worth a ping
+            if diff_pct >= 10:
+                try:
+                    tg.alert_system_error_sync(
+                        f"Partial fill reconciled [{mode}] {sym}",
+                        f"planned={planned}, filled={int(actual_qty)} ({diff_pct:.0f}% short)",
+                        level="INFO",
+                    )
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Partial-fill reconcile failed for %s: %s", sym, exc)
+
+
 # ── Main monitor ──────────────────────────────────────────────────────────────
 
 async def run_monitor(db: Session, user_id: int | None = None, mode: str | None = None):
@@ -560,6 +642,12 @@ async def run_monitor(db: Session, user_id: int | None = None, mode: str | None 
         day_pnl      = float(acct.equity) - float(acct.last_equity)
 
         if market_open and positions:
+            # Step 0: Reconcile partial fills before any stop/target sizing.
+            # Exit orders are sized off pos.qty (already correct), but
+            # weekly_plan.position_size and the BUY trade_log entry are
+            # frozen at submit-time, so partial fills leave them stale.
+            _reconcile_partial_fills(db, positions, mode)
+
             try:
                 open_orders_by_symbol = alp.get_open_orders_by_symbol(mode)
 
