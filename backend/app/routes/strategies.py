@@ -380,6 +380,57 @@ def get_dm_history(
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
+class DmBacktestParams(BaseModel):
+    start_year:      int   | None = 2010
+    end_year:        int   | None = None
+    lookback_months: int   | None = 12
+    frequency:       str   | None = "monthly"   # monthly | biweekly | weekly
+    initial_capital: float | None = 10_000.0
+
+
+@router.post("/dual-momentum/backtest")
+def run_dm_backtest(
+    body: DmBacktestParams,
+    current_user: dict = Depends(get_current_user),
+):
+    from datetime import datetime
+    from ..strategies.dm_backtest import run_backtest
+
+    current_year = datetime.utcnow().year
+    start_year   = body.start_year or 2010
+    end_year     = body.end_year or current_year
+    lookback     = body.lookback_months or 12
+    frequency    = body.frequency or "monthly"
+    capital      = body.initial_capital or 10_000.0
+
+    if start_year < 2003 or start_year > current_year - 2:
+        raise HTTPException(status_code=400, detail=f"start_year must be 2003..{current_year - 2}")
+    if end_year < start_year or end_year > current_year:
+        raise HTTPException(status_code=400, detail="end_year must be >= start_year and <= current year")
+    if lookback < 3 or lookback > 24:
+        raise HTTPException(status_code=400, detail="lookback_months must be 3..24")
+    if frequency not in ("monthly", "biweekly", "weekly"):
+        raise HTTPException(status_code=400, detail="frequency must be monthly, biweekly, or weekly")
+    if capital < 100 or capital > 10_000_000:
+        raise HTTPException(status_code=400, detail="initial_capital must be 100..10,000,000")
+
+    try:
+        result = run_backtest(
+            start_year=start_year,
+            end_year=end_year,
+            lookback_months=lookback,
+            frequency=frequency,
+            initial_capital=capital,
+        )
+    except Exception as exc:
+        logger.exception("DM backtest failed")
+        raise HTTPException(status_code=500, detail=f"backtest failed: {exc}")
+
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=result.get("error", "backtest failed"))
+    return result
+
+
 @router.get("/dual-momentum/config")
 def get_dm_config(
     current_user: dict = Depends(get_current_user),

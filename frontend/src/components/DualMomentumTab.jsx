@@ -12,6 +12,7 @@ import {
   fetchDMHistory,
   fetchDMConfig,
   updateDMConfig,
+  runDMBacktest,
   fetchAccount,
 } from '../api/client'
 import TapeCheck from './TapeCheck'
@@ -303,6 +304,161 @@ function HistoryTable({ history }) {
 }
 
 // ── Settings accordion ────────────────────────────────────────────────────────
+function BacktestPanel() {
+  const currentYear = new Date().getFullYear()
+  const [params, setParams] = useState({
+    start_year: 2010,
+    end_year: currentYear,
+    lookback_months: 12,
+    frequency: 'monthly',
+    initial_capital: 10000,
+  })
+  const [result, setResult] = useState(null)
+  const [error, setError]   = useState(null)
+
+  const { mutate: run, isLoading } = useMutation(runDMBacktest, {
+    onSuccess: data => { setResult(data); setError(null) },
+    onError:   err  => { setError(err?.response?.data?.detail || 'Backtest failed'); setResult(null) },
+  })
+
+  function update(field, value) {
+    setParams(p => ({ ...p, [field]: value }))
+  }
+
+  const summary   = result?.summary
+  const benchmark = result?.benchmark_spy
+  const signals   = result?.signals || []
+
+  return (
+    <div className="card p-4">
+      <SectionTitle>Backtest</SectionTitle>
+      <p className="text-xs text-slate-500 mb-3">
+        Walk-forward replay using Yahoo Finance daily closes. No look-ahead — each rebalance uses only data
+        available at that date.
+      </p>
+
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
+        <label className="text-xs">
+          <span className="block text-slate-500 mb-1">Start year</span>
+          <input type="number" min={2003} max={currentYear - 2} value={params.start_year}
+            onChange={e => update('start_year', parseInt(e.target.value) || 2010)}
+            className="input w-full" />
+        </label>
+        <label className="text-xs">
+          <span className="block text-slate-500 mb-1">End year</span>
+          <input type="number" min={2003} max={currentYear} value={params.end_year}
+            onChange={e => update('end_year', parseInt(e.target.value) || currentYear)}
+            className="input w-full" />
+        </label>
+        <label className="text-xs">
+          <span className="block text-slate-500 mb-1">Lookback (months)</span>
+          <input type="number" min={3} max={24} value={params.lookback_months}
+            onChange={e => update('lookback_months', parseInt(e.target.value) || 12)}
+            className="input w-full" />
+        </label>
+        <label className="text-xs">
+          <span className="block text-slate-500 mb-1">Frequency</span>
+          <select value={params.frequency} onChange={e => update('frequency', e.target.value)}
+            className="input w-full">
+            <option value="monthly">Monthly</option>
+            <option value="biweekly">Biweekly</option>
+            <option value="weekly">Weekly</option>
+          </select>
+        </label>
+        <label className="text-xs">
+          <span className="block text-slate-500 mb-1">Initial capital ($)</span>
+          <input type="number" min={100} max={10_000_000} step={1000} value={params.initial_capital}
+            onChange={e => update('initial_capital', parseFloat(e.target.value) || 10000)}
+            className="input w-full" />
+        </label>
+      </div>
+
+      <button onClick={() => run(params)} disabled={isLoading} className="btn-primary">
+        {isLoading ? (
+          <span className="flex items-center gap-2">
+            <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            Running backtest…
+          </span>
+        ) : 'Run Backtest'}
+      </button>
+
+      {error && (
+        <div className="mt-3 p-3 rounded-lg border border-red-500/20 bg-red-500/5 text-red-300 text-xs">
+          {error}
+        </div>
+      )}
+
+      {summary && (
+        <div className="mt-4 space-y-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Metric label="Final equity"  value={currency(summary.final_equity)} />
+            <Metric label="Total return"  value={pct(summary.total_return)} positive={summary.total_return >= 0} />
+            <Metric label="CAGR"          value={pct(summary.cagr)} positive={summary.cagr >= 0} />
+            <Metric label="Sharpe"        value={fmt(summary.sharpe)} />
+            <Metric label="Max drawdown"  value={pct(summary.max_drawdown)} positive={false} />
+            <Metric label="Rotations"     value={summary.rotations} />
+            <Metric label="Years"         value={fmt(summary.years, 1)} />
+            <Metric label="vs SPY (CAGR)" value={`${pct(summary.cagr - benchmark.cagr)}`}
+              positive={summary.cagr >= benchmark.cagr} />
+          </div>
+
+          {benchmark && (
+            <div className="p-3 rounded-lg border border-white/5 bg-white/[0.02] text-xs text-slate-400">
+              <span className="text-slate-500">Buy &amp; hold SPY: </span>
+              <span className="text-slate-300">total {pct(benchmark.total_return)} · CAGR {pct(benchmark.cagr)} · MDD {pct(benchmark.max_drawdown)}</span>
+            </div>
+          )}
+
+          {signals.length > 0 && (
+            <div>
+              <div className="label mb-2">Rotations ({signals.length})</div>
+              <div className="overflow-x-auto rounded-lg border border-white/5 max-h-80 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-slate-900/95 backdrop-blur text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Date</th>
+                      <th className="px-3 py-2 text-left">From → To</th>
+                      <th className="px-3 py-2 text-right">Price</th>
+                      <th className="px-3 py-2 text-right">Equity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {signals.map((s, i) => (
+                      <tr key={i} className="border-t border-white/5 text-slate-300">
+                        <td className="px-3 py-1.5">{s.date}</td>
+                        <td className="px-3 py-1.5">
+                          <span className="text-slate-500">{s.from}</span>
+                          <span className="mx-1 text-slate-600">→</span>
+                          <span>{s.to}</span>
+                        </td>
+                        <td className="px-3 py-1.5 text-right">{currency(s.price)}</td>
+                        <td className="px-3 py-1.5 text-right">{currency(s.equity_before)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+function Metric({ label, value, positive }) {
+  const color = positive == null ? 'text-slate-200'
+    : positive ? 'text-emerald-400' : 'text-red-400'
+  return (
+    <div className="p-3 rounded-lg border border-white/5 bg-white/[0.02]">
+      <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">{label}</div>
+      <div className={`text-sm font-semibold ${color}`}>{value}</div>
+    </div>
+  )
+}
+
+
 function StrategySettings({ config, onSave, saving, globalMode = 'paper' }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState(null)
@@ -673,6 +829,9 @@ export default function DualMomentumTab() {
           <HistoryTable history={history} />
         </div>
       </div>
+
+      {/* Backtest */}
+      <BacktestPanel />
 
       {/* Settings */}
       <StrategySettings config={config} onSave={saveConfig} saving={saving} globalMode={globalMode} />
