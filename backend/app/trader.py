@@ -543,24 +543,30 @@ def _reconcile_partial_fills(db: Session, positions, mode: str) -> None:
             if planned <= 0 or planned == int(actual_qty):
                 continue
 
+            # Decide whether this is a "fresh" partial fill worth alerting on.
+            # If the most-recent BUY trade_log entry is older than 2 hours, the
+            # drift is historical state we're cleaning up — sync silently.
+            tl = db.execute(
+                _text("""
+                    SELECT id, EXTRACT(EPOCH FROM (NOW() - created_at)) AS age_sec
+                    FROM trade_log
+                    WHERE symbol = :sym AND mode = :mode AND action = 'BUY'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """),
+                {"sym": sym, "mode": mode},
+            ).fetchone()
+            is_fresh = bool(tl and tl[1] is not None and float(tl[1]) < 7200)
+
             db.execute(
                 _text("UPDATE weekly_plan SET position_size = :q WHERE id = :id"),
                 {"q": int(actual_qty), "id": wp[0]},
             )
-
-            # Sync the most-recent BUY trade_log entry too
-            db.execute(
-                _text("""
-                    UPDATE trade_log SET qty = :q
-                    WHERE id = (
-                        SELECT id FROM trade_log
-                        WHERE symbol = :sym AND mode = :mode AND action = 'BUY'
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    )
-                """),
-                {"q": actual_qty, "sym": sym, "mode": mode},
-            )
+            if tl:
+                db.execute(
+                    _text("UPDATE trade_log SET qty = :q WHERE id = :id"),
+                    {"q": actual_qty, "id": tl[0]},
+                )
             db.commit()
 
             diff_pct = abs(actual_qty - planned) / planned * 100
@@ -568,8 +574,10 @@ def _reconcile_partial_fills(db: Session, positions, mode: str) -> None:
                 "Reconciled %s [%s]: planned=%d actual=%.0f (%.1f%% diff)",
                 sym, mode, planned, actual_qty, diff_pct,
             )
-            # Alert on material partial fill — stale-by-a-share isn't worth a ping
-            if diff_pct >= 10:
+            # Alert on material partial fill — but only when fresh.
+            # Older drift is historical state being cleaned up (e.g. first
+            # monitor cycle after this reconciler shipped) — sync silently.
+            if diff_pct >= 10 and is_fresh:
                 try:
                     tg.alert_system_error_sync(
                         f"Partial fill reconciled [{mode}] {sym}",
