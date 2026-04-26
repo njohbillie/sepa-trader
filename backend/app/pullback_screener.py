@@ -28,6 +28,39 @@ logger = logging.getLogger(__name__)
 
 SCAN_URL = "https://scanner.tradingview.com/america/scan"
 
+
+def _validate_tv_payload(payload: dict, expected_cols: list[str], context: str) -> list[dict]:
+    """Sanity-check a TradingView scan response before zipping into dicts.
+
+    TV occasionally renames or drops columns silently — when that happens the
+    response either returns no `data` key, returns rows with the wrong number
+    of cells, or produces all-None rows. We raise RuntimeError so the caller
+    can log + alert instead of returning an empty plan with no signal.
+    """
+    if not isinstance(payload, dict) or "data" not in payload:
+        raise RuntimeError(f"TV {context}: response missing 'data' key (schema drift?)")
+
+    rows = payload.get("data") or []
+    if not rows:
+        return []
+
+    expected_n = len(expected_cols)
+    sample     = rows[0]
+    if not isinstance(sample, dict) or "d" not in sample or "s" not in sample:
+        raise RuntimeError(f"TV {context}: row shape changed (no 's'/'d' keys)")
+    if len(sample.get("d") or []) != expected_n:
+        raise RuntimeError(
+            f"TV {context}: column count mismatch — got {len(sample['d'])}, expected {expected_n}"
+        )
+
+    # All-None sentinel: if every cell of the critical columns is None, schema
+    # drift renamed them. Check the first 5 rows on the close column (always [0]).
+    sample_size = min(5, len(rows))
+    if all((rows[i].get("d") or [None])[0] is None for i in range(sample_size)):
+        raise RuntimeError(f"TV {context}: critical column 'close' is all-None across sample rows")
+
+    return rows
+
 # TradingView columns fetched for every candidate.
 # Only confirmed-valid column names — relative volume is derived locally
 # from volume / average_volume_30d_calc.
@@ -358,8 +391,19 @@ def _fetch_and_refine(tv_syms: list[str], cfg: dict) -> list[dict]:
         logger.error("Pullback TV data fetch failed: %s", exc)
         return []
 
+    try:
+        rows = _validate_tv_payload(resp.json(), _PB_COLS, "fetch_and_refine")
+    except RuntimeError as exc:
+        logger.error("Pullback TV schema invalid: %s", exc)
+        try:
+            from . import telegram_alerts as tg
+            tg.alert_system_error_sync("Pullback screener: TV schema drift", exc)
+        except Exception:
+            pass
+        return []
+
     candidates = []
-    for row in resp.json().get("data", []):
+    for row in rows:
         sym = row["s"].split(":")[-1]
         v   = dict(zip(_PB_COLS, row["d"]))
         c   = _local_refinement(sym, v, cfg)
@@ -476,8 +520,19 @@ def _tv_filter_serverside(cfg: dict) -> list[dict]:
         logger.error("Pullback TV server-side filter scan failed: %s", exc)
         return []
 
+    try:
+        rows = _validate_tv_payload(resp.json(), _PB_COLS, "serverside_filter")
+    except RuntimeError as exc:
+        logger.error("Pullback TV schema invalid: %s", exc)
+        try:
+            from . import telegram_alerts as tg
+            tg.alert_system_error_sync("Pullback screener: TV schema drift", exc)
+        except Exception:
+            pass
+        return []
+
     candidates = []
-    for row in resp.json().get("data", []):
+    for row in rows:
         sym = row["s"].split(":")[-1]
         v   = dict(zip(_PB_COLS, row["d"]))
         c   = _local_refinement(sym, v, cfg)
@@ -486,7 +541,7 @@ def _tv_filter_serverside(cfg: dict) -> list[dict]:
 
     logger.info(
         "Pullback [Option A]: TV returned %d pre-filtered stocks, %d passed local refinement",
-        len(resp.json().get("data", [])), len(candidates),
+        len(rows), len(candidates),
     )
     return candidates
 
@@ -697,8 +752,10 @@ def _score_candidates(
     """
     from .strategies.yf_client import fetch_ohlcv, get_next_earnings_date
 
-    today = date.today()
-    out   = []
+    today        = date.today()
+    out          = []
+    fail_count   = 0
+    last_fail_exc: Exception | None = None
 
     for c in candidates:
         sym = c["symbol"]
@@ -799,8 +856,35 @@ def _score_candidates(
             })
 
         except Exception as exc:
-            logger.debug("Pullback: %s failed in pass-2: %s", sym, exc)
+            fail_count   += 1
+            last_fail_exc = exc
+            logger.warning("Pullback: %s failed in pass-2: %s", sym, exc)
             continue
+
+    # If yfinance is having a bad day, the entire pass-2 silently degrades.
+    # Surface it: warn at >=30% failure, alert + raise at >=70% so the
+    # scheduler error path catches it and notifies via Telegram.
+    total = len(candidates)
+    if total >= 5 and fail_count >= 1:
+        rate = fail_count / total
+        if rate >= 0.7:
+            logger.error(
+                "Pullback pass-2: %d/%d candidates failed (%.0f%%) — likely yfinance outage",
+                fail_count, total, rate * 100,
+            )
+            try:
+                from . import telegram_alerts as tg
+                tg.alert_system_error_sync(
+                    f"Pullback pass-2 degraded: {fail_count}/{total} symbols failed",
+                    last_fail_exc or RuntimeError("unknown"),
+                )
+            except Exception:
+                pass
+        elif rate >= 0.3:
+            logger.warning(
+                "Pullback pass-2: %d/%d candidates failed (%.0f%%)",
+                fail_count, total, rate * 100,
+            )
 
     return out
 
