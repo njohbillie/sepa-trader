@@ -18,6 +18,30 @@ def _size_qty(portfolio: float, entry: float, stop: float, risk_pct: float, stop
     return (portfolio * risk_pct / 100) / stop_dollar
 
 
+def _settled_funds_available(acct, portfolio: float, min_cash_pct: float, committed: float = 0.0) -> float:
+    """Funds genuinely available to deploy on a new buy.
+
+    Alpaca's `buying_power` includes unsettled proceeds from same-day sales,
+    which can phantom-double the available cash on rebalance days
+    (T+1 settlement, finalized 2024). Prefer settled `cash`, fall back to
+    non-marginable buying power, last resort `buying_power`.
+
+    `committed` is dollars already earmarked by earlier buys in the same
+    multi-symbol loop, so we don't repeatedly hand out the same cash.
+    """
+    settled = 0.0
+    for attr in ("cash", "non_marginable_buying_power", "buying_power"):
+        try:
+            v = float(getattr(acct, attr) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            settled = v
+            break
+    buffer  = portfolio * (min_cash_pct / 100)
+    return max(0.0, settled - buffer - committed)
+
+
 def _effective_max_positions(db: Session, mode: str) -> int:
     """
     For live accounts under $10K, cap max_positions at 3 regardless of
@@ -366,9 +390,12 @@ def run_monday_open(db: Session, mode: str | None = None):
         logger.error("Monday open: could not fetch account: %s", exc)
         return
 
-    risk_pct = float(get_setting(db, "risk_pct", "2.0"))
-    stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
-    held     = {p.symbol for p in positions}
+    risk_pct         = float(get_setting(db, "risk_pct", "2.0"))
+    stop_pct         = float(get_setting(db, "stop_loss_pct", "8.0"))
+    min_cash_pct     = float(get_setting(db, "min_cash_pct",     "10.0") or "10.0")
+    max_position_pct = float(get_setting(db, "max_position_pct", "20.0") or "20.0")
+    held             = {p.symbol for p in positions}
+    committed        = 0.0
 
     for row in rows:
         sym     = row[0]
@@ -382,8 +409,17 @@ def run_monday_open(db: Session, mode: str | None = None):
             continue
 
         qty = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
+        # Settlement-aware: cap by settled cash net of running spend
+        max_pos_shares = int(portfolio * max_position_pct / 100 / entry) if entry > 0 else 0
+        if max_pos_shares > 0:
+            qty = min(qty, max_pos_shares)
+        avail = _settled_funds_available(acct, portfolio, min_cash_pct, committed)
+        if avail > 0 and entry > 0:
+            qty = min(qty, int(avail / entry))
+        else:
+            qty = 0
         if qty < 1:
-            logger.info("Monday open: skipping %s — position size < 1 share.", sym)
+            logger.info("Monday open: skipping %s — position size < 1 share (avail=$%.2f).", sym, avail)
             continue
 
         if not _gate(db, sym, qty, entry, stop, target, "MONDAY_OPEN", mode):
@@ -416,6 +452,7 @@ def run_monday_open(db: Session, mode: str | None = None):
             )
             db.commit()
             held.add(sym)
+            committed += qty * entry
 
         except Exception as exc:
             logger.error("Monday open: buy failed for %s: %s", sym, exc)
@@ -697,12 +734,18 @@ def _execute_specific_pick(db: Session, mode: str, symbol: str, pending_picks: l
         logger.error("Slot refill: account fetch failed: %s", exc)
         return
 
-    risk_pct = float(get_setting(db, "risk_pct", "2.0"))
-    stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
-    qty      = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
+    risk_pct     = float(get_setting(db, "risk_pct", "2.0"))
+    stop_pct     = float(get_setting(db, "stop_loss_pct", "8.0"))
+    min_cash_pct = float(get_setting(db, "min_cash_pct", "10.0") or "10.0")
+    qty          = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
+    avail        = _settled_funds_available(acct, portfolio, min_cash_pct, 0.0)
+    if avail > 0 and entry > 0:
+        qty = min(qty, int(avail / entry))
+    else:
+        qty = 0
 
     if qty < 1:
-        logger.info("Slot refill: %s position size < 1 share — skipping.", symbol)
+        logger.info("Slot refill: %s position size < 1 share (avail=$%.2f) — skipping.", symbol, avail)
         return
 
     if not _gate(db, symbol, qty, entry, stop, target, "SLOT_REFILL", mode):
@@ -775,9 +818,15 @@ def _execute_next_pick(db: Session, mode: str, held: set):
         logger.error("Post-close fallback: account fetch failed: %s", exc)
         return
 
-    risk_pct = float(get_setting(db, "risk_pct", "2.0"))
-    stop_pct = float(get_setting(db, "stop_loss_pct", "8.0"))
-    qty      = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
+    risk_pct     = float(get_setting(db, "risk_pct", "2.0"))
+    stop_pct     = float(get_setting(db, "stop_loss_pct", "8.0"))
+    min_cash_pct = float(get_setting(db, "min_cash_pct", "10.0") or "10.0")
+    qty          = _size_qty(portfolio, entry, stop, risk_pct, stop_pct)
+    avail        = _settled_funds_available(acct, portfolio, min_cash_pct, 0.0)
+    if avail > 0 and entry > 0:
+        qty = min(qty, int(avail / entry))
+    else:
+        qty = 0
     if qty < 1:
         return
 
@@ -973,6 +1022,8 @@ def fill_open_slots(
 
     from .sepa_analyzer import analyze
 
+    committed = 0.0   # running spend across the loop, drains settled cash
+
     for row in rows:
         sym     = row[0]
         entry   = float(row[1] or 0)
@@ -1023,11 +1074,14 @@ def fill_open_slots(
             max_pos_shares  = int(portfolio * max_position_pct / 100 / price)
             if max_pos_shares > 0:
                 qty = min(qty, max_pos_shares)
-            # Never spend cash that would drop below the min_cash_pct buffer
-            available_cash = (buying_power or cash or portfolio) - portfolio * min_cash_pct / 100
+            # Settlement-aware: prefer settled cash over buying_power and
+            # subtract spend already committed earlier in this loop.
+            available_cash = _settled_funds_available(acct, portfolio, min_cash_pct, committed)
             if available_cash > 0:
                 max_cash_shares = int(available_cash / price)
                 qty = min(qty, max_cash_shares)
+            else:
+                qty = 0
         if qty < 1:
             logger.info("fill_open_slots: %s qty<1 (price=$%.2f stop=$%.2f) — skipping.", sym, price, stop)
             continue
@@ -1060,6 +1114,7 @@ def fill_open_slots(
             )
             db.commit()
 
+            committed += qty * price
             held_symbols.add(sym)
             total_held += 1
             if stype in ("minervini", "both"):
