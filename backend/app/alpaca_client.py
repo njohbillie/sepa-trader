@@ -106,6 +106,34 @@ def get_all_orders(mode: str = "paper", limit: int = 100):
     )
 
 
+def find_recent_fill(mode: str, symbol: str, side: str, days: int = 30):
+    """Return the most-recent FILLED order for (symbol, side) within `days`,
+    or None if none found. Used to reconstruct SELL fills that were executed
+    by Alpaca-side bracket OCOs (stop / take-profit) which the bot never
+    submitted itself and therefore never logged.
+    """
+    from datetime import datetime, timedelta, timezone
+    side_enum = OrderSide.SELL if side.upper() == "SELL" else OrderSide.BUY
+    after = datetime.now(timezone.utc) - timedelta(days=days)
+    try:
+        orders = get_client(mode).get_orders(
+            GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                symbols=[symbol],
+                side=side_enum,
+                after=after,
+                limit=100,
+            )
+        )
+    except Exception:
+        return None
+    fills = [o for o in (orders or []) if getattr(o, "status", None) and str(o.status).lower().endswith("filled") and getattr(o, "filled_at", None)]
+    if not fills:
+        return None
+    fills.sort(key=lambda o: o.filled_at, reverse=True)
+    return fills[0]
+
+
 def get_clock(mode: str = "paper"):
     return get_client(mode).get_clock()
 

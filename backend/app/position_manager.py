@@ -505,6 +505,16 @@ def check_post_close(db: Session, mode: str | None = None):
 
     logger.info("[%s] Detected closed positions: %s", mode, closed)
 
+    # Log a SELL row for each newly closed symbol so trade_log reflects the
+    # bracket-OCO exit that fired on Alpaca's side. Without this, BUYs sit in
+    # trade_log forever with no matching SELL and reconcile_db_vs_alpaca
+    # raises false POSITION DRIFT alerts on every monitor cycle.
+    for sym in closed:
+        try:
+            _log_alpaca_side_sell(db, sym, mode)
+        except Exception as exc:
+            logger.error("[%s] failed to log SELL for closed %s: %s", mode, sym, exc)
+
     # Resolve AI API key: prefer user-setting 'ai_api_key', fall back to legacy 'claude_api_key'
     try:
         from sqlalchemy import text as _t
@@ -1187,6 +1197,122 @@ def fill_open_slots(
                 logger.error("fill_open_slots: buy failed for %s: %s", sym, exc)
 
 
+# ── Bracket-OCO SELL reconstruction ──────────────────────────────────────────
+
+def _trigger_from_order_type(order_type: str) -> str:
+    """Map an Alpaca order_type to a trade_log trigger label."""
+    t = (order_type or "").lower()
+    if "stop" in t:
+        return "STOP_HIT"     # stop or stop_limit leg of bracket
+    if "limit" in t:
+        return "TARGET_HIT"   # take-profit limit leg of bracket
+    return "MANUAL"           # plain market — manual close or liquidation
+
+
+def _has_sell_after_last_buy(db: Session, sym: str, mode: str) -> bool:
+    """True if trade_log already records a SELL after the most recent BUY for
+    (sym, mode). Used to keep SELL inserts idempotent across retries and
+    backfill runs."""
+    row = db.execute(
+        text("""
+            SELECT 1
+            FROM trade_log s
+            WHERE s.symbol = :s AND s.mode = :m AND s.action = 'SELL'
+              AND s.created_at > COALESCE((
+                  SELECT MAX(created_at) FROM trade_log
+                  WHERE symbol = :s AND mode = :m AND action = 'BUY'
+              ), '1970-01-01'::timestamp)
+            LIMIT 1
+        """),
+        {"s": sym, "m": mode},
+    ).fetchone()
+    return bool(row)
+
+
+def _log_alpaca_side_sell(db: Session, sym: str, mode: str) -> bool:
+    """Reconstruct a SELL trade_log entry for `sym` by querying Alpaca for the
+    most recent filled SELL order. Idempotent: skips if a SELL is already
+    recorded after the last BUY. Returns True if a row was inserted."""
+    if _has_sell_after_last_buy(db, sym, mode):
+        return False
+    fill = alp.find_recent_fill(mode, sym, "SELL", days=45)
+    if not fill:
+        logger.warning(
+            "[%s] %s closed on Alpaca but no recent filled SELL order found — "
+            "cannot reconstruct trade_log SELL entry", mode, sym,
+        )
+        return False
+    try:
+        price = float(fill.filled_avg_price or 0)
+        qty   = float(fill.filled_qty or 0)
+    except (TypeError, ValueError):
+        price, qty = 0.0, 0.0
+    trigger = _trigger_from_order_type(str(getattr(fill, "order_type", "") or ""))
+    db.execute(
+        text("""
+            INSERT INTO trade_log (symbol, action, qty, price, trigger, mode, created_at)
+            VALUES (:s, 'SELL', :q, :p, :t, :m, :ts)
+        """),
+        {
+            "s": sym, "q": qty, "p": price, "t": trigger, "m": mode,
+            # Use Alpaca's filled_at so reconciliation and PnL math reflect
+            # the actual close time, not the moment we noticed it.
+            "ts": getattr(fill, "filled_at", None),
+        },
+    )
+    db.commit()
+    logger.info(
+        "[%s] reconstructed SELL: %s qty=%s @ %s (trigger=%s)",
+        mode, sym, qty, price, trigger,
+    )
+    return True
+
+
+def backfill_missing_sells(db: Session, mode: str) -> dict:
+    """One-shot recovery: for every symbol that the DB still treats as open
+    (BUY without later SELL) but that Alpaca no longer holds, query Alpaca's
+    closed-order history and insert the missing SELL row.
+
+    Safe to run repeatedly — `_log_alpaca_side_sell` is idempotent.
+    """
+    try:
+        alpaca_syms = {p.symbol for p in alp.get_positions(mode)}
+    except Exception as exc:
+        logger.error("backfill_missing_sells [%s]: alpaca fetch failed: %s", mode, exc)
+        return {"backfilled": [], "skipped": [], "error": str(exc)}
+
+    rows = db.execute(
+        text("""
+            SELECT symbol
+            FROM trade_log t
+            WHERE mode = :mode AND action = 'BUY'
+              AND created_at >= NOW() - INTERVAL '60 days'
+              AND NOT EXISTS (
+                  SELECT 1 FROM trade_log s
+                  WHERE s.symbol = t.symbol AND s.mode = t.mode
+                    AND s.action = 'SELL' AND s.created_at > t.created_at
+              )
+        """),
+        {"mode": mode},
+    ).fetchall()
+    candidates = {r[0] for r in rows} - alpaca_syms
+
+    backfilled, skipped = [], []
+    for sym in sorted(candidates):
+        try:
+            if _log_alpaca_side_sell(db, sym, mode):
+                backfilled.append(sym)
+            else:
+                skipped.append(sym)
+        except Exception as exc:
+            logger.error("backfill_missing_sells [%s] %s: %s", mode, sym, exc)
+            skipped.append(sym)
+    if backfilled:
+        logger.info("backfill_missing_sells [%s]: backfilled=%s skipped=%s",
+                    mode, backfilled, skipped)
+    return {"backfilled": backfilled, "skipped": skipped}
+
+
 # ── DB ↔ Alpaca position reconciliation ──────────────────────────────────────
 
 _RECONCILE_LAST_ALERT: dict[str, float] = {}
@@ -1216,6 +1342,15 @@ def reconcile_db_vs_alpaca(db: Session, mode: str) -> dict:
     except Exception as exc:
         logger.error("reconcile_db_vs_alpaca [%s]: alpaca fetch failed: %s", mode, exc)
         return {"drift": False, "error": str(exc)}
+
+    # Self-heal: try to reconstruct any missing SELL rows from Alpaca order
+    # history before measuring drift. Bracket-OCO exits (stop / target) close
+    # the position on Alpaca's side without the bot ever submitting a SELL,
+    # so trade_log can fall behind without this step.
+    try:
+        backfill_missing_sells(db, mode)
+    except Exception as exc:
+        logger.warning("reconcile_db_vs_alpaca [%s]: backfill failed: %s", mode, exc)
 
     try:
         rows = db.execute(
