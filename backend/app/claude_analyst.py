@@ -15,6 +15,73 @@ from .database import get_setting, get_user_setting
 
 logger = logging.getLogger(__name__)
 
+
+def _apply_executed_guard(
+    db: Session,
+    mode: str,
+    user_id: int | None,
+    picks: list[dict],
+) -> None:
+    """Stamp weekly_plan rows EXECUTED for any symbol we already hold or have
+    BUY/SELL'd today, then mirror the change onto the in-memory picks list.
+
+    Called from analyze_picks_structured so a manual /analysis/run reflects
+    live broker state even when no rescreen has happened since the last fill
+    or close. Idempotent and best-effort — on Alpaca outage, falls back to
+    the trade_log set so today's activity is still respected.
+    """
+    held: set[str] = set()
+    try:
+        from . import alpaca_client as alp
+        held = {p.symbol for p in alp.get_positions(mode)}
+    except Exception as exc:
+        logger.warning(
+            "_apply_executed_guard: Alpaca positions unreachable for mode=%s: %s",
+            mode, exc,
+        )
+
+    traded_today: set[str] = set()
+    try:
+        traded_today = {
+            r[0] for r in db.execute(
+                text("""SELECT DISTINCT symbol FROM trade_log
+                        WHERE action IN ('BUY', 'SELL') AND mode = :mode
+                          AND created_at >= CURRENT_DATE"""),
+                {"mode": mode},
+            ).fetchall()
+        }
+    except Exception as exc:
+        logger.debug("_apply_executed_guard: trade_log lookup failed: %s", exc)
+
+    to_stamp = held | traded_today
+    if not to_stamp:
+        return
+
+    try:
+        db.execute(
+            text("""
+                UPDATE weekly_plan SET status = 'EXECUTED'
+                WHERE week_start = (
+                    SELECT MAX(week_start) FROM weekly_plan
+                    WHERE mode = :mode AND user_id IS NOT DISTINCT FROM :uid
+                )
+                  AND mode   = :mode
+                  AND user_id IS NOT DISTINCT FROM :uid
+                  AND symbol IN :syms
+                  AND status = 'PENDING'
+            """),
+            {"mode": mode, "uid": user_id, "syms": tuple(to_stamp)},
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("_apply_executed_guard: DB update failed: %s", exc)
+
+    for p in picks:
+        if p.get("symbol") in to_stamp and str(p.get("status", "")).upper() == "PENDING":
+            p["status"] = "EXECUTED"
+
+
 # ── Alpaca news fetcher ───────────────────────────────────────────────────────
 
 def _fetch_alpaca_news(
@@ -737,6 +804,14 @@ def analyze_picks_structured(
         raise ValueError("AI API key not configured in Settings.")
 
     import json as _json
+
+    # Reconcile EXECUTED status against live broker state right before AI runs.
+    # _save_plan does the same at screener time, but a manual /analysis/run
+    # several hours later sees stale plan rows — positions opened or closed in
+    # the interim still showed as PENDING. Stamp them now so neither the AI
+    # nor the operator wastes a slot re-analysing a name we already hold or
+    # just closed today.
+    _apply_executed_guard(db, mode, user_id, picks)
 
     pending = [p for p in picks if str(p.get("status", "")).upper() == "PENDING"]
     if not pending:

@@ -181,6 +181,21 @@ def _adjust_trailing_stops(
         if new_stop is None:
             continue  # gain < 1R
 
+        # Cap the new stop just below the nearest open take-profit so Alpaca
+        # never rejects an OCO whose stop sits above its limit. With a split
+        # bracket the relevant target depends on whether T1 has already filled
+        # — that's checked via oco_count below; here we use the tighter of the
+        # two if both are still in play.
+        active_targets = [t for t in (target, target2) if t and t > 0]
+        if active_targets:
+            target_cap = round(min(active_targets) * 0.999, 2)
+            if new_stop >= target_cap:
+                logger.debug(
+                    "Trailing stop: %s new=$%.2f would breach target cap $%.2f — clamping.",
+                    sym, new_stop, target_cap,
+                )
+                new_stop = target_cap
+
         current_stop      = _get_current_stop_price(open_orders_by_symbol.get(sym, []))
         effective_current = current_stop if current_stop else stop_orig
 
@@ -361,7 +376,38 @@ def _ensure_exit_orders(
                     else:
                         logger.debug("Exit guard: %s split OCOs in place — no action.", sym)
                 else:
-                    # T1 was hit — only T2 lot remains; validate against target2
+                    # T1 was hit — only T2 lot remains. Auto-raise stop to
+                    # at least breakeven (entry price): the first lot already
+                    # locked in profit, so the worst-case on the remaining
+                    # shares should be a scratch trade. Trailing stops can
+                    # still ratchet higher; this only sets the floor.
+                    entry_price = float(getattr(pos, "avg_entry_price", 0) or 0)
+                    be_stop     = max(stop, entry_price) if entry_price > 0 else stop
+                    if be_stop > stop and entry_price > 0:
+                        logger.info(
+                            "Exit guard: T1 filled for %s — raising stop to BE $%.2f (was $%.2f) [%s]",
+                            sym, be_stop, stop, mode,
+                        )
+                        try:
+                            db.execute(
+                                text("""
+                                    UPDATE weekly_plan SET stop_price = :s
+                                    WHERE symbol = :sym AND mode = :mode
+                                      AND week_start = (
+                                          SELECT MAX(week_start) FROM weekly_plan WHERE mode = :mode
+                                      )
+                                """),
+                                {"s": be_stop, "sym": sym, "mode": mode},
+                            )
+                            db.commit()
+                        except Exception as exc:
+                            logger.warning("BE update for %s failed: %s", sym, exc)
+                        stop = be_stop
+                        stop_changed = (
+                            current_stop is not None
+                            and abs(current_stop - stop) > _PRICE_CHANGE_THRESHOLD
+                        )
+
                     target_changed = (
                         current_target is not None
                         and abs(current_target - target2) > _PRICE_CHANGE_THRESHOLD

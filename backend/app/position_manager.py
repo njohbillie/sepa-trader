@@ -1257,42 +1257,79 @@ def _has_sell_after_last_buy(db: Session, sym: str, mode: str) -> bool:
 
 
 def _log_alpaca_side_sell(db: Session, sym: str, mode: str) -> bool:
-    """Reconstruct a SELL trade_log entry for `sym` by querying Alpaca for the
-    most recent filled SELL order. Idempotent: skips if a SELL is already
-    recorded after the last BUY. Returns True if a row was inserted."""
-    if _has_sell_after_last_buy(db, sym, mode):
-        return False
-    fill = alp.find_recent_fill(mode, sym, "SELL", days=45)
-    if not fill:
+    """Reconstruct ALL missing SELL trade_log entries for `sym` by walking
+    Alpaca's filled SELL orders since the last logged BUY. Inserts each fill
+    that is not already recorded (matched by filled_at timestamp), so a split
+    bracket exit (T1 then T2) becomes two trade_log rows at the actual T1/T2
+    fill prices instead of one row at the most-recent fill price.
+
+    Returns True if any new row was inserted.
+    """
+    last_buy_at = db.execute(
+        text("""
+            SELECT MAX(created_at) FROM trade_log
+            WHERE symbol = :s AND mode = :m AND action = 'BUY'
+        """),
+        {"s": sym, "m": mode},
+    ).scalar()
+
+    fills = alp.find_recent_fills(mode, sym, "SELL", days=45)
+    if not fills:
         logger.warning(
-            "[%s] %s closed on Alpaca but no recent filled SELL order found — "
-            "cannot reconstruct trade_log SELL entry", mode, sym,
+            "[%s] %s closed on Alpaca but no recent filled SELL orders found — "
+            "cannot reconstruct trade_log SELL entries", mode, sym,
         )
         return False
-    try:
-        price = float(fill.filled_avg_price or 0)
-        qty   = float(fill.filled_qty or 0)
-    except (TypeError, ValueError):
-        price, qty = 0.0, 0.0
-    trigger = _trigger_from_order_type(str(getattr(fill, "order_type", "") or ""))
-    db.execute(
-        text("""
-            INSERT INTO trade_log (symbol, action, qty, price, trigger, mode, created_at)
-            VALUES (:s, 'SELL', :q, :p, :t, :m, :ts)
-        """),
-        {
-            "s": sym, "q": qty, "p": price, "t": trigger, "m": mode,
-            # Use Alpaca's filled_at so reconciliation and PnL math reflect
-            # the actual close time, not the moment we noticed it.
-            "ts": getattr(fill, "filled_at", None),
-        },
-    )
-    db.commit()
-    logger.info(
-        "[%s] reconstructed SELL: %s qty=%s @ %s (trigger=%s)",
-        mode, sym, qty, price, trigger,
-    )
-    return True
+
+    # Filter to fills that occurred after the most recent BUY
+    if last_buy_at is not None:
+        fills = [
+            f for f in fills
+            if getattr(f, "filled_at", None) and f.filled_at > last_buy_at
+        ]
+    if not fills:
+        return False
+
+    # Skip any fill whose timestamp already exists in trade_log (idempotent
+    # against repeated calls — e.g. monitor + manual reconcile in same cycle).
+    existing_ts = {
+        r[0] for r in db.execute(
+            text("""
+                SELECT created_at FROM trade_log
+                WHERE symbol = :s AND mode = :m AND action = 'SELL'
+                  AND created_at > COALESCE(:since, '1970-01-01'::timestamp)
+            """),
+            {"s": sym, "m": mode, "since": last_buy_at},
+        ).fetchall()
+    }
+
+    inserted = 0
+    for fill in fills:
+        ts = getattr(fill, "filled_at", None)
+        if ts is None or ts in existing_ts:
+            continue
+        try:
+            price = float(fill.filled_avg_price or 0)
+            qty   = float(fill.filled_qty or 0)
+        except (TypeError, ValueError):
+            price, qty = 0.0, 0.0
+        trigger = _trigger_from_order_type(str(getattr(fill, "order_type", "") or ""))
+        db.execute(
+            text("""
+                INSERT INTO trade_log (symbol, action, qty, price, trigger, mode, created_at)
+                VALUES (:s, 'SELL', :q, :p, :t, :m, :ts)
+            """),
+            {"s": sym, "q": qty, "p": price, "t": trigger, "m": mode, "ts": ts},
+        )
+        inserted += 1
+        logger.info(
+            "[%s] reconstructed SELL: %s qty=%s @ %s (trigger=%s, filled_at=%s)",
+            mode, sym, qty, price, trigger, ts,
+        )
+
+    if inserted:
+        db.commit()
+    return inserted > 0
 
 
 def backfill_missing_sells(db: Session, mode: str) -> dict:

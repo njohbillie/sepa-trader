@@ -134,6 +134,37 @@ def find_recent_fill(mode: str, symbol: str, side: str, days: int = 30):
     return fills[0]
 
 
+def find_recent_fills(mode: str, symbol: str, side: str, days: int = 30) -> list:
+    """Return ALL filled orders for (symbol, side) within `days`, sorted oldest
+    → newest. Used by _log_alpaca_side_sell to reconstruct multi-leg exits
+    (T1 then T2) so each fill becomes its own trade_log SELL row instead of
+    one row at the most-recent fill price.
+    """
+    from datetime import datetime, timedelta, timezone
+    side_enum = OrderSide.SELL if side.upper() == "SELL" else OrderSide.BUY
+    after = datetime.now(timezone.utc) - timedelta(days=days)
+    try:
+        orders = get_client(mode).get_orders(
+            GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                symbols=[symbol],
+                side=side_enum,
+                after=after,
+                limit=100,
+            )
+        )
+    except Exception:
+        return []
+    fills = [
+        o for o in (orders or [])
+        if getattr(o, "status", None)
+           and str(o.status).lower().endswith("filled")
+           and getattr(o, "filled_at", None)
+    ]
+    fills.sort(key=lambda o: o.filled_at)
+    return fills
+
+
 def get_clock(mode: str = "paper"):
     return get_client(mode).get_clock()
 
