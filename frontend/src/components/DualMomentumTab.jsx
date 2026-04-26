@@ -12,6 +12,7 @@ import {
   fetchDMHistory,
   fetchDMConfig,
   updateDMConfig,
+  copyDMConfig,
   runDMBacktest,
   fetchAccount,
 } from '../api/client'
@@ -459,7 +460,7 @@ function Metric({ label, value, positive }) {
 }
 
 
-function StrategySettings({ config, onSave, saving, globalMode = 'paper' }) {
+function StrategySettings({ config, onSave, saving, globalMode = 'paper', onCopy, copying }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState(null)
 
@@ -550,6 +551,25 @@ function StrategySettings({ config, onSave, saving, globalMode = 'paper' }) {
               </span>
               <span className="text-[10px] text-slate-600">follows global mode switch</span>
             </div>
+          </div>
+
+          {/* Copy settings between modes */}
+          <div className="flex items-center justify-between gap-3 bg-white/[0.02] border border-white/[0.06] rounded-xl px-3 py-2">
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              Paper and live settings are independent. Test in paper, then copy to live.
+            </p>
+            <button
+              onClick={() => {
+                const dst = globalMode === 'paper' ? 'live' : 'paper'
+                if (window.confirm(`Overwrite ${dst.toUpperCase()} settings with current ${globalMode.toUpperCase()} settings?`)) {
+                  onCopy?.()
+                }
+              }}
+              disabled={copying || !onCopy}
+              className="text-xs px-3 py-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 disabled:opacity-50 whitespace-nowrap"
+            >
+              {copying ? 'Copying…' : `Copy ${globalMode} → ${globalMode === 'paper' ? 'live' : 'paper'}`}
+            </button>
           </div>
 
           {/* Evaluation schedule */}
@@ -671,11 +691,18 @@ function StrategySettings({ config, onSave, saving, globalMode = 'paper' }) {
 export default function DualMomentumTab() {
   const qc = useQueryClient()
 
+  const { data: accountMeta } = useQuery('account', fetchAccount, { staleTime: 5000 })
+  const globalMode = accountMeta?.mode ?? 'paper'
+
   const { data: env,       isLoading: envLoading } = useQuery('market-env',  fetchMarketEnvironment, { staleTime: 60_000 })
   const { data: signal,    isLoading: sigLoading } = useQuery('dm-signal',   fetchDMSignal,          { staleTime: 30_000 })
   const { data: positions, isLoading: posLoading } = useQuery('dm-position', fetchDMPosition,        { staleTime: 10_000, retry: false })
   const { data: history                          } = useQuery('dm-history',  () => fetchDMHistory(24), { staleTime: 30_000 })
-  const { data: config                           } = useQuery('dm-config',   fetchDMConfig,          { staleTime: 60_000 })
+  const { data: config                           } = useQuery(
+    ['dm-config', globalMode],
+    () => fetchDMConfig(globalMode),
+    { staleTime: 60_000 },
+  )
 
   const [toast,      setToast]      = useState(null)
   const [evalResult, setEvalResult] = useState(null)
@@ -705,10 +732,24 @@ export default function DualMomentumTab() {
     onError: err => showToast(err?.response?.data?.detail || 'Execution failed', 'error'),
   })
 
-  const { mutate: saveConfig, isLoading: saving } = useMutation(updateDMConfig, {
-    onSuccess: () => { qc.invalidateQueries('dm-config'); showToast('Settings saved') },
-    onError:   err => showToast(err?.response?.data?.detail || 'Save failed', 'error'),
-  })
+  const { mutate: saveConfig, isLoading: saving } = useMutation(
+    (data) => updateDMConfig({ data, mode: globalMode }),
+    {
+      onSuccess: () => { qc.invalidateQueries(['dm-config', globalMode]); showToast(`Settings saved (${globalMode})`) },
+      onError:   err => showToast(err?.response?.data?.detail || 'Save failed', 'error'),
+    },
+  )
+
+  const { mutate: copyToOther, isLoading: copying } = useMutation(
+    () => copyDMConfig(globalMode, globalMode === 'paper' ? 'live' : 'paper'),
+    {
+      onSuccess: () => {
+        qc.invalidateQueries(['dm-config'])
+        showToast(`Copied ${globalMode} → ${globalMode === 'paper' ? 'live' : 'paper'}`)
+      },
+      onError: err => showToast(err?.response?.data?.detail || 'Copy failed', 'error'),
+    },
+  )
 
   const displaySignal = evalResult
     ? { ai_verdict: evalResult.ai_decision?.decision, ai_reasoning: evalResult.ai_decision?.reasoning, recommended_symbol: evalResult.signal?.recommended_symbol, mode: globalMode }
@@ -717,10 +758,6 @@ export default function DualMomentumTab() {
   const momentum = evalResult?.signal?.momentum || signal?.data?.momentum
   const envData  = evalResult?.market_env       || env
   const gemReason = evalResult?.signal?.reasoning || signal?.data?.reasoning
-
-  // Global trading mode drives everything — DM no longer has its own mode
-  const { data: accountMeta } = useQuery('account', fetchAccount, { staleTime: 5000 })
-  const globalMode = accountMeta?.mode ?? 'paper'
 
   // Hard-block: DM requires dedicated Alpaca keys — no sharing with Minervini account
   const hasDedicatedKeys = config && (
@@ -834,7 +871,7 @@ export default function DualMomentumTab() {
       <BacktestPanel />
 
       {/* Settings */}
-      <StrategySettings config={config} onSave={saveConfig} saving={saving} globalMode={globalMode} />
+      <StrategySettings config={config} onSave={saveConfig} saving={saving} globalMode={globalMode} onCopy={copyToOther} copying={copying} />
     </div>
   )
 }

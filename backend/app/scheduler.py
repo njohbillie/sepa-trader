@@ -491,17 +491,13 @@ async def _dm_watchdog():
         from sqlalchemy import text as _text
         from .database import get_user_setting, set_user_setting
 
+        # Per-mode rows: each (user, mode) is evaluated independently using
+        # that mode's own settings JSONB. Settings used to live in
+        # user_settings (one shared copy across modes) — now they're scoped
+        # to each row's `settings` field.
         rows = db.execute(_text("""
-            SELECT sc.user_id, sc.auto_execute,
-                   COALESCE(us_day.value,  '1')        AS eval_day,
-                   COALESCE(us_freq.value, 'monthly')  AS frequency,
-                   COALESCE(us_vix.value,  '30')       AS vix_threshold,
-                   COALESCE(us_dd.value,   '10')       AS spy_drawdown_threshold
+            SELECT sc.user_id, sc.trading_mode, sc.auto_execute, sc.settings
             FROM strategy_config sc
-            LEFT JOIN user_settings us_day  ON us_day.user_id  = sc.user_id AND us_day.key  = 'dm_eval_day'
-            LEFT JOIN user_settings us_freq ON us_freq.user_id = sc.user_id AND us_freq.key = 'dm_eval_frequency'
-            LEFT JOIN user_settings us_vix  ON us_vix.user_id  = sc.user_id AND us_vix.key  = 'dm_vix_threshold'
-            LEFT JOIN user_settings us_dd   ON us_dd.user_id   = sc.user_id AND us_dd.key   = 'dm_spy_drawdown_threshold'
             WHERE sc.strategy_name = 'dual_momentum'
               AND sc.is_active = true
         """)).fetchall()
@@ -509,15 +505,19 @@ async def _dm_watchdog():
         if not rows:
             return
 
-        for user_id, auto_execute, eval_day_str, frequency, vix_thr_str, dd_thr_str in rows:
+        for user_id, row_mode, auto_execute, settings_json in rows:
+            cfg = settings_json if isinstance(settings_json, dict) else (json.loads(settings_json or "{}"))
             try:
-                eval_day        = max(1,   min(28,  int(eval_day_str   or "1")))
-                vix_threshold   = max(15,  min(80,  float(vix_thr_str  or "30")))
-                spy_drawdown    = max(3,   min(30,  float(dd_thr_str   or "10")))
-            except ValueError:
-                eval_day, vix_threshold, spy_drawdown = 1, 30.0, 10.0
+                eval_day      = max(1,   min(28,  int(cfg.get("eval_day", 1) or 1)))
+                frequency     = cfg.get("eval_frequency", "monthly")
+                vix_threshold = max(15,  min(80,  float(cfg.get("vix_threshold", 30) or 30)))
+                spy_drawdown  = max(3,   min(30,  float(cfg.get("spy_drawdown_threshold", 10) or 10)))
+            except (ValueError, TypeError):
+                eval_day, frequency, vix_threshold, spy_drawdown = 1, "monthly", 30.0, 10.0
 
-            last_eval_date = get_user_setting(db, "dm_last_eval_date", "", user_id)
+            # Last-eval markers are per-(user, mode) so paper and live track
+            # independently (paper can re-eval without affecting live).
+            last_eval_date = get_user_setting(db, f"dm_last_eval_date_{row_mode}", "", user_id)
 
             # ── A: Scheduled frequency ────────────────────────────────────────
             scheduled = False
@@ -542,7 +542,7 @@ async def _dm_watchdog():
                 else:
                     scheduled = True
             else:  # monthly
-                last_month = get_user_setting(db, "dm_last_eval_month", "", user_id)
+                last_month = get_user_setting(db, f"dm_last_eval_month_{row_mode}", "", user_id)
                 this_month = now_et.strftime("%Y-%m")
                 scheduled  = (last_month != this_month) and (now_et.day >= eval_day)
 
@@ -556,8 +556,9 @@ async def _dm_watchdog():
 
             reason = cb_reason if cb_triggered else f"{frequency} schedule"
 
-            # Always follow the user's global trading mode
-            mode = get_user_setting(db, "trading_mode", "paper", user_id)
+            # Use the row's own trading_mode — paper rows eval against paper
+            # account, live rows against live, regardless of UI's current view.
+            mode = row_mode
 
             # Bug #6: check dedicated keys BEFORE running evaluation
             from .routes.strategies import _dm_has_dedicated_keys

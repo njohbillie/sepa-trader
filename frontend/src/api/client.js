@@ -121,8 +121,9 @@ export const evaluateDualMomentum   = () => api.post('/strategies/dual-momentum/
 export const executeDualMomentum    = () => api.post('/strategies/dual-momentum/execute').then(r => r.data)
 export const fetchDMPosition        = () => api.get('/strategies/dual-momentum/position').then(r => r.data)
 export const fetchDMHistory         = (limit = 24) => api.get(`/strategies/dual-momentum/history?limit=${limit}`).then(r => r.data)
-export const fetchDMConfig          = () => api.get('/strategies/dual-momentum/config').then(r => r.data)
-export const updateDMConfig         = (data) => api.patch('/strategies/dual-momentum/config', data).then(r => r.data)
+export const fetchDMConfig          = (mode) => api.get('/strategies/dual-momentum/config', { params: mode ? { mode } : {} }).then(r => r.data)
+export const updateDMConfig         = ({ data, mode }) => api.patch('/strategies/dual-momentum/config', data, { params: mode ? { mode } : {} }).then(r => r.data)
+export const copyDMConfig           = (src, dst) => api.post('/strategies/dual-momentum/copy-config', null, { params: { src, dst } }).then(r => r.data)
 export const runDMBacktest          = (params) => api.post('/strategies/dual-momentum/backtest', params).then(r => r.data)
 
 // ── Market tape check ─────────────────────────────────────────────────────────

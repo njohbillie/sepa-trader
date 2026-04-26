@@ -180,6 +180,45 @@ def _run_migrations():
             ADD COLUMN IF NOT EXISTS ai_analysis JSONB
         """))
 
+        # ── Split strategy_config by trading_mode ────────────────────────────
+        # Originally one row per (user_id, strategy_name) with shared settings
+        # across paper/live. Now one row per (user_id, strategy_name, trading_mode)
+        # so paper can be tuned independently as a sandbox before promoting to
+        # live. Backfill duplicates the existing row into the missing mode so
+        # current values carry over to both modes initially.
+        db.execute(text("""
+            INSERT INTO strategy_config
+                (user_id, strategy_name, trading_mode, is_active, auto_execute,
+                 alpaca_paper_key, alpaca_paper_secret, alpaca_live_key, alpaca_live_secret, settings)
+            SELECT user_id, strategy_name,
+                   CASE WHEN trading_mode = 'paper' THEN 'live' ELSE 'paper' END AS new_mode,
+                   is_active, auto_execute,
+                   alpaca_paper_key, alpaca_paper_secret, alpaca_live_key, alpaca_live_secret, settings
+            FROM strategy_config sc
+            WHERE NOT EXISTS (
+                SELECT 1 FROM strategy_config sc2
+                WHERE sc2.user_id = sc.user_id
+                  AND sc2.strategy_name = sc.strategy_name
+                  AND sc2.trading_mode = CASE WHEN sc.trading_mode = 'paper' THEN 'live' ELSE 'paper' END
+            )
+            ON CONFLICT DO NOTHING
+        """))
+        db.execute(text("""
+            ALTER TABLE strategy_config DROP CONSTRAINT IF EXISTS strategy_config_user_id_strategy_name_key
+        """))
+        db.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'strategy_config_user_strategy_mode_key'
+                ) THEN
+                    ALTER TABLE strategy_config
+                    ADD CONSTRAINT strategy_config_user_strategy_mode_key
+                    UNIQUE (user_id, strategy_name, trading_mode);
+                END IF;
+            END$$;
+        """))
+
         # ── Market tape cache (phase-3) ───────────────────────────────────────
         db.execute(text("""
             CREATE TABLE IF NOT EXISTS market_tape_cache (

@@ -33,17 +33,18 @@ STRATEGY_DM = "dual_momentum"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_strategy_config(db: Session, user_id: int, strategy_name: str) -> dict:
+def _get_strategy_config(db: Session, user_id: int, strategy_name: str, mode: str = "paper") -> dict:
     row = db.execute(
-        text("SELECT * FROM strategy_config WHERE user_id = :uid AND strategy_name = :name"),
-        {"uid": user_id, "name": strategy_name},
+        text("SELECT * FROM strategy_config "
+             "WHERE user_id = :uid AND strategy_name = :name AND trading_mode = :mode"),
+        {"uid": user_id, "name": strategy_name, "mode": mode},
     ).fetchone()
     if not row:
         return {
             "strategy_name":       strategy_name,
             "is_active":           False,
             "auto_execute":        False,
-            "trading_mode":        "paper",
+            "trading_mode":        mode,
             "alpaca_paper_key":    "",
             "alpaca_paper_secret": "",
             "alpaca_live_key":     "",
@@ -79,8 +80,9 @@ def _resolve_strategy_alpaca_client(db: Session, user_id: int, strategy_name: st
     """
     row = db.execute(
         text("SELECT alpaca_paper_key, alpaca_paper_secret, alpaca_live_key, alpaca_live_secret "
-             "FROM strategy_config WHERE user_id = :uid AND strategy_name = :name"),
-        {"uid": user_id, "name": strategy_name},
+             "FROM strategy_config "
+             "WHERE user_id = :uid AND strategy_name = :name AND trading_mode = :mode"),
+        {"uid": user_id, "name": strategy_name, "mode": mode},
     ).fetchone()
 
     user_settings = get_all_user_settings(db, user_id)
@@ -112,8 +114,9 @@ def _dm_has_dedicated_keys(db: Session, user_id: int, mode: str) -> bool:
     """
     row = db.execute(
         text("SELECT alpaca_paper_key, alpaca_paper_secret, alpaca_live_key, alpaca_live_secret "
-             "FROM strategy_config WHERE user_id = :uid AND strategy_name = :name"),
-        {"uid": user_id, "name": STRATEGY_DM},
+             "FROM strategy_config "
+             "WHERE user_id = :uid AND strategy_name = :name AND trading_mode = :mode"),
+        {"uid": user_id, "name": STRATEGY_DM, "mode": mode},
     ).fetchone()
     if not row:
         return False
@@ -206,8 +209,8 @@ def evaluate_dual_momentum(
     mode         = user_settings.get("trading_mode", "paper")
     cfg          = db.execute(
         text("SELECT auto_execute FROM strategy_config "
-             "WHERE user_id = :uid AND strategy_name = :name"),
-        {"uid": uid, "name": STRATEGY_DM},
+             "WHERE user_id = :uid AND strategy_name = :name AND trading_mode = :mode"),
+        {"uid": uid, "name": STRATEGY_DM, "mode": mode},
     ).fetchone()
     auto_execute = cfg[0] if cfg else False
 
@@ -431,12 +434,21 @@ def run_dm_backtest(
     return result
 
 
+def _resolve_mode(db: Session, user_id: int, mode: str | None) -> str:
+    if mode in ("paper", "live"):
+        return mode
+    user_settings = get_all_user_settings(db, user_id)
+    return user_settings.get("trading_mode", "paper")
+
+
 @router.get("/dual-momentum/config")
 def get_dm_config(
+    mode: str | None = None,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return _get_strategy_config(db, current_user["id"], STRATEGY_DM)
+    resolved = _resolve_mode(db, current_user["id"], mode)
+    return _get_strategy_config(db, current_user["id"], STRATEGY_DM, resolved)
 
 
 class DmConfigUpdate(BaseModel):
@@ -456,22 +468,25 @@ class DmConfigUpdate(BaseModel):
 @router.patch("/dual-momentum/config")
 def update_dm_config(
     body: DmConfigUpdate,
+    mode: str | None = None,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    uid = current_user["id"]
+    uid      = current_user["id"]
+    resolved = _resolve_mode(db, uid, mode)
 
-    # Upsert row
+    # Upsert row for the requested mode
     db.execute(
         text("""
-            INSERT INTO strategy_config (user_id, strategy_name) VALUES (:uid, :name)
-            ON CONFLICT (user_id, strategy_name) DO NOTHING
+            INSERT INTO strategy_config (user_id, strategy_name, trading_mode)
+            VALUES (:uid, :name, :mode)
+            ON CONFLICT (user_id, strategy_name, trading_mode) DO NOTHING
         """),
-        {"uid": uid, "name": STRATEGY_DM},
+        {"uid": uid, "name": STRATEGY_DM, "mode": resolved},
     )
 
     updates = []
-    params  = {"uid": uid, "name": STRATEGY_DM}
+    params  = {"uid": uid, "name": STRATEGY_DM, "mode": resolved}
 
     # Collect new plain-text key values (skip masked placeholders)
     new_keys: dict[str, str] = {}
@@ -504,10 +519,8 @@ def update_dm_config(
             except Exception as exc:
                 raise HTTPException(400, f"Live Alpaca credentials invalid: {str(exc)[:200]}")
 
-        # Encrypt before storing
-        for field, plain in new_keys.items():
-            updates.append(f"{field} = :{field}")
-            params[field] = _enc(plain) if plain else ""
+        # Credentials are written to BOTH mode rows below (they aren't mode-
+        # specific in the row design). Skip adding them to per-mode `updates`.
 
     for field in ("is_active", "auto_execute"):
         val = getattr(body, field)
@@ -518,38 +531,82 @@ def update_dm_config(
     extra_settings = {}
     if body.lookback_months is not None:
         extra_settings["lookback_months"] = body.lookback_months
-
-    from ..database import set_user_setting as _sus
     if body.eval_day is not None:
-        v = max(1, min(28, body.eval_day))
-        extra_settings["eval_day"] = v
-        _sus(db, "dm_eval_day", str(v), uid)
-    if body.eval_frequency is not None:
-        if body.eval_frequency in ("monthly", "biweekly", "weekly"):
-            extra_settings["eval_frequency"] = body.eval_frequency
-            _sus(db, "dm_eval_frequency", body.eval_frequency, uid)
+        extra_settings["eval_day"] = max(1, min(28, body.eval_day))
+    if body.eval_frequency is not None and body.eval_frequency in ("monthly", "biweekly", "weekly"):
+        extra_settings["eval_frequency"] = body.eval_frequency
     if body.vix_threshold is not None:
-        v = max(15.0, min(80.0, body.vix_threshold))
-        extra_settings["vix_threshold"] = v
-        _sus(db, "dm_vix_threshold", str(v), uid)
+        extra_settings["vix_threshold"] = max(15.0, min(80.0, body.vix_threshold))
     if body.spy_drawdown_threshold is not None:
-        v = max(3.0, min(30.0, body.spy_drawdown_threshold))
-        extra_settings["spy_drawdown_threshold"] = v
-        _sus(db, "dm_spy_drawdown_threshold", str(v), uid)
+        extra_settings["spy_drawdown_threshold"] = max(3.0, min(30.0, body.spy_drawdown_threshold))
 
     if extra_settings:
         updates.append("settings = settings || CAST(:extra AS jsonb)")
         params["extra"] = json.dumps(extra_settings)
 
     if updates:
+        # Per-mode update for is_active/auto_execute/settings/credentials.
+        # Credentials are stored on each mode's row but conceptually belong to
+        # the (user, strategy) pair — write the same cred fields to BOTH mode
+        # rows so they stay in sync. Other fields stay scoped to `resolved`.
         db.execute(
             text(f"UPDATE strategy_config SET {', '.join(updates)} "
-                 f"WHERE user_id = :uid AND strategy_name = :name"),
+                 f"WHERE user_id = :uid AND strategy_name = :name AND trading_mode = :mode"),
             params,
         )
+        if new_keys:
+            cred_updates = [f"{f} = :{f}" for f in new_keys.keys()]
+            cred_params  = {"uid": uid, "name": STRATEGY_DM}
+            for f, v in new_keys.items():
+                cred_params[f] = _enc(v) if v else ""
+            db.execute(
+                text(f"UPDATE strategy_config SET {', '.join(cred_updates)} "
+                     f"WHERE user_id = :uid AND strategy_name = :name"),
+                cred_params,
+            )
         db.commit()
 
-    return {"status": "updated"}
+    return {"status": "updated", "mode": resolved}
+
+
+@router.post("/dual-momentum/copy-config")
+def copy_dm_config(
+    src: str = "paper",
+    dst: str = "live",
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Copy non-credential DM settings from one mode to the other.
+    Use after validating a config in paper to promote it to live.
+    Credentials are unaffected (already shared across mode rows)."""
+    if src not in ("paper", "live") or dst not in ("paper", "live") or src == dst:
+        raise HTTPException(400, "src and dst must be different and one of paper/live")
+    uid = current_user["id"]
+    src_row = db.execute(
+        text("SELECT is_active, auto_execute, settings FROM strategy_config "
+             "WHERE user_id = :uid AND strategy_name = :name AND trading_mode = :mode"),
+        {"uid": uid, "name": STRATEGY_DM, "mode": src},
+    ).fetchone()
+    if not src_row:
+        raise HTTPException(404, f"No DM config found for {src} mode")
+    db.execute(
+        text("""
+            INSERT INTO strategy_config (user_id, strategy_name, trading_mode, is_active, auto_execute, settings)
+            VALUES (:uid, :name, :mode, :is_active, :auto_execute, CAST(:settings AS jsonb))
+            ON CONFLICT (user_id, strategy_name, trading_mode) DO UPDATE
+              SET is_active    = EXCLUDED.is_active,
+                  auto_execute = EXCLUDED.auto_execute,
+                  settings     = EXCLUDED.settings
+        """),
+        {
+            "uid": uid, "name": STRATEGY_DM, "mode": dst,
+            "is_active":    src_row[0],
+            "auto_execute": src_row[1],
+            "settings":     json.dumps(src_row[2]) if not isinstance(src_row[2], str) else src_row[2],
+        },
+    )
+    db.commit()
+    return {"status": "copied", "src": src, "dst": dst}
 
 
 # ── Execution helpers ─────────────────────────────────────────────────────────
