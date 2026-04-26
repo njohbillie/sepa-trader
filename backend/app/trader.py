@@ -245,7 +245,6 @@ def _adjust_trailing_stops(
             # so a placement failure leaves the position naked until the next
             # monitor cycle. Alert immediately.
             try:
-                from . import telegram_alerts as tg
                 tg.alert_system_error_sync(
                     f"NAKED POSITION [{mode}] {sym} — trailing-stop replace failed",
                     exc,
@@ -377,7 +376,6 @@ def _ensure_exit_orders(
                         except Exception as exc:
                             logger.error("Exit guard: T2 OCO replacement failed for %s: %s", sym, exc)
                             try:
-                                from . import telegram_alerts as tg
                                 tg.alert_system_error_sync(
                                     f"NAKED POSITION [{mode}] {sym} — T2 OCO replace failed",
                                     exc,
@@ -403,7 +401,6 @@ def _ensure_exit_orders(
                     except Exception as exc:
                         logger.error("Exit guard: OCO replacement failed for %s: %s", sym, exc)
                         try:
-                            from . import telegram_alerts as tg
                             tg.alert_system_error_sync(
                                 f"NAKED POSITION [{mode}] {sym} — OCO replace failed",
                                 exc,
@@ -443,7 +440,6 @@ def _ensure_exit_orders(
             except Exception as exc:
                 logger.error("Exit guard: split OCO placement failed for %s: %s", sym, exc)
                 try:
-                    from . import telegram_alerts as tg
                     tg.alert_system_error_sync(
                         f"NAKED POSITION [{mode}] {sym} — split OCO placement failed",
                         exc,
@@ -460,7 +456,6 @@ def _ensure_exit_orders(
             except Exception as exc:
                 logger.error("Exit guard: failed to place OCO for %s: %s", sym, exc)
                 try:
-                    from . import telegram_alerts as tg
                     tg.alert_system_error_sync(
                         f"NAKED POSITION [{mode}] {sym} — OCO placement failed",
                         exc,
@@ -555,7 +550,6 @@ def _gate(
     except Exception as exc:
         logger.error("Pre-trade gate error for %s: %s — BLOCKING (fail-closed).", symbol, exc)
         try:
-            from . import telegram_alerts as tg
             tg.alert_system_error_sync(f"Pre-trade gate {symbol} [{mode}]", exc, level="URGENT")
         except Exception:
             pass
@@ -575,7 +569,6 @@ def _reconcile_partial_fills(db: Session, positions, mode: str) -> None:
     context and the cash-buffer calculation on the next monitor cycle.
     """
     from sqlalchemy import text as _text
-    from . import telegram_alerts as tg
 
     for pos in positions:
         sym       = pos.symbol
@@ -735,7 +728,6 @@ async def run_monitor(db: Session, user_id: int | None = None, mode: str | None 
             except Exception as exc:
                 logger.error("Stop management cycle failed: %s", exc)
                 try:
-                    from . import telegram_alerts as tg
                     tg.alert_system_error_sync(f"Monitor stop-mgmt cycle [{mode}]", exc)
                 except Exception:
                     pass
@@ -897,7 +889,6 @@ async def run_monitor(db: Session, user_id: int | None = None, mode: str | None 
     except Exception as exc:
         logger.exception("Monitor [%s] top-level failure", mode)
         try:
-            from . import telegram_alerts as tg
             tg.alert_system_error_sync(f"Monitor crashed [{mode}]", exc)
         except Exception:
             pass
