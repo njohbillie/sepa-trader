@@ -146,10 +146,14 @@ def get_pb_settings(db: Session, user_id: int) -> dict:
             for e in _s("pb_exchanges", "NYSE,NASDAQ").split(",")
             if e.strip()
         ],
-        # Sector exclusion — comma-separated TV sector names to block
+        # Sector exclusion — unified across screeners. Falls back to the
+        # legacy pb-specific key, then to DEFAULT_EXCLUDED_SECTORS.
         "excluded_sectors": [
             s.strip()
-            for s in _s("pb_excluded_sectors", DEFAULT_EXCLUDED_SECTORS).split(",")
+            for s in (
+                _s("screener_excluded_sectors", "")
+                or _s("pb_excluded_sectors", DEFAULT_EXCLUDED_SECTORS)
+            ).split(",")
             if s.strip()
         ],
         # Minimum YoY revenue growth % (0 = disabled)

@@ -143,9 +143,14 @@ def get_rs_settings(db: Session, user_id: int) -> dict:
         "require_stage2":  _s("rs_require_stage2", "true") == "true",
         "max_extension":   float(_s("rs_max_extension",   15.0)),   # % above EMA50
         "top_n":           int(  _s("rs_top_n",           5)),
+        # Sector exclusion — unified across screeners. Falls back to the
+        # legacy rs-specific key, then to _DEFAULT_EXCLUDED_SECTORS.
         "excluded_sectors": [
             s.strip()
-            for s in _s("rs_excluded_sectors", ",".join(_DEFAULT_EXCLUDED_SECTORS)).split(",")
+            for s in (
+                _s("screener_excluded_sectors", "")
+                or _s("rs_excluded_sectors", ",".join(_DEFAULT_EXCLUDED_SECTORS))
+            ).split(",")
             if s.strip()
         ],
         "exchanges": [

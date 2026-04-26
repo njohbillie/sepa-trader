@@ -14,11 +14,122 @@ from datetime import date, timedelta
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+import httpx
+
 from .tv_analyzer import batch_analyze
 from .database import get_setting, set_setting, get_user_setting, set_user_setting
 from . import telegram_alerts as tg
 
 logger = logging.getLogger(__name__)
+
+# ── Market-wide universe scan ────────────────────────────────────────────────
+#
+# Replaces the hardcoded DEFAULT_UNIVERSE with a server-side TradingView scan
+# constrained to SEPA Stage-2 trend candidates. Returns up to ~300 symbols
+# pre-filtered by liquidity, price, exchange, sector, and trend ladder so the
+# downstream batch_analyze() doesn't waste calls on names that can't possibly
+# score well.
+
+_TV_SCAN_URL = "https://scanner.tradingview.com/america/scan"
+_TV_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Origin":  "https://www.tradingview.com",
+    "Referer": "https://www.tradingview.com/",
+}
+
+
+def _fetch_market_universe(
+    price_min: float,
+    price_max: float,
+    excluded_sectors: set[str],
+    exchanges: list[str] | None = None,
+    max_results: int = 300,
+) -> list[str]:
+    """Server-side TradingView scan for SEPA Stage-2 candidates.
+
+    Returns a list of plain symbols (no exchange prefix). Empty list on failure
+    so the caller can fall back to DEFAULT_UNIVERSE without crashing the run.
+
+    Filters enforced server-side:
+      • Price ≥ max(price_min, $5) — avoid penny-stock noise even if user lets
+        price_min default to 0
+      • Optional price ceiling
+      • 30-day average volume ≥ 500k shares
+      • Market cap ≥ $300M (small-cap floor; lets mid-caps and up through)
+      • Exchange in {NYSE, NASDAQ} (or user override)
+      • Stage-2 trend ladder: close > SMA50 > SMA150 > SMA200
+      • Within 30% of 52-week high (Stage-2 requirement)
+
+    Sector exclusion is applied locally on the returned rows (TV doesn't
+    expose a clean negative-set operator across all sector strings).
+    """
+    floor_price = max(5.0, price_min or 0)
+    filters: list[dict] = [
+        {"left": "close", "operation": "egreater", "right": floor_price},
+        {"left": "average_volume_30d_calc", "operation": "egreater", "right": 500_000},
+        {"left": "market_cap_basic", "operation": "egreater", "right": 300_000_000},
+        {"left": "exchange", "operation": "in_range",
+         "right": exchanges or ["NYSE", "NASDAQ"]},
+        # Stage-2 trend ladder (Minervini's templates 1, 2, 3, 4 in one go)
+        {"left": "close",  "operation": "greater", "right": "SMA50"},
+        {"left": "SMA50",  "operation": "greater", "right": "SMA150"},
+        {"left": "SMA150", "operation": "greater", "right": "SMA200"},
+    ]
+    if price_max and price_max > 0:
+        filters.append({"left": "close", "operation": "eless", "right": price_max})
+
+    columns = ["close", "sector", "average_volume_30d_calc", "market_cap_basic"]
+
+    try:
+        resp = httpx.post(
+            _TV_SCAN_URL,
+            json={
+                "filter":  filters,
+                "columns": columns,
+                "range":   [0, max_results],
+                "sort":    {"sortBy": "market_cap_basic", "sortOrder": "desc"},
+                "markets": ["america"],
+            },
+            timeout=30,
+            headers=_TV_HEADERS,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.error("Market-wide TV scan failed: %s", exc)
+        return []
+
+    rows = (payload or {}).get("data") or []
+    if not rows:
+        logger.warning("Market-wide TV scan returned 0 rows — check filter set or TV availability")
+        return []
+
+    # Local sector exclusion. `sector` column is at index 1.
+    out: list[str] = []
+    skipped_sector = 0
+    for row in rows:
+        try:
+            full_sym = row["s"]                  # e.g. "NASDAQ:AAPL"
+            sector   = (row["d"][1] or "").strip()
+        except (KeyError, IndexError, TypeError):
+            continue
+        if excluded_sectors and sector in excluded_sectors:
+            skipped_sector += 1
+            continue
+        sym = full_sym.split(":")[-1]
+        out.append(sym)
+
+    if skipped_sector:
+        logger.info(
+            "Market-wide scan: %d rows from TV, %d skipped by sector filter, %d kept",
+            len(rows), skipped_sector, len(out),
+        )
+    else:
+        logger.info("Market-wide scan: %d candidates from TV", len(out))
+    return out
 
 # Default universe: top ~120 liquid US stocks across S&P 500 / NASDAQ 100.
 # Users can override via the screener_universe setting (comma-separated).
@@ -178,16 +289,36 @@ def run_screener(db: Session, mode: str = None, user_id: int = None, account_val
             )
             min_score_floor = floor_from_limits
 
+    # Universe selection priority:
+    #   1. Explicit `screener_universe` CSV override (testing / watchlist mode)
+    #   2. Market-wide TV scan (default — picks up real Stage-2 leaders fresh
+    #      every run instead of re-scoring the same hardcoded mega-caps)
+    #   3. Hardcoded DEFAULT_UNIVERSE as last-resort fallback if the TV scan
+    #      returns nothing (network blip, schema drift)
     universe_raw = _s("screener_universe", "")
-    universe = (
-        [s.strip().upper() for s in universe_raw.split(",") if s.strip()]
-        if universe_raw
-        else DEFAULT_UNIVERSE
-    )
+    if universe_raw:
+        universe = [s.strip().upper() for s in universe_raw.split(",") if s.strip()]
+        universe_source = "override"
+    else:
+        scanned = _fetch_market_universe(
+            price_min=price_min,
+            price_max=price_max,
+            excluded_sectors=excluded_sectors,
+        )
+        if scanned:
+            universe = scanned
+            universe_source = "market_scan"
+        else:
+            universe = DEFAULT_UNIVERSE
+            universe_source = "fallback_default"
+            logger.warning(
+                "Market-wide scan returned nothing — falling back to DEFAULT_UNIVERSE (%d names)",
+                len(universe),
+            )
 
     logger.info(
-        "Screener: scanning %d symbols via TradingView (mode=%s, tier=%s, account=$%.0f)...",
-        len(universe), mode, tier_label, account_value,
+        "Screener: scanning %d symbols via TradingView (source=%s, mode=%s, tier=%s, account=$%.0f)...",
+        len(universe), universe_source, mode, tier_label, account_value,
     )
 
     # Single batch call — all symbols in one TradingView scanner request
