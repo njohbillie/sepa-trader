@@ -19,7 +19,7 @@ EDITABLE_KEYS = {
     "screener_universe",
     "screener_price_min", "screener_price_max", "screener_top_n",
     "screener_min_score", "screener_vol_surge_pct", "screener_ema20_pct", "screener_ema50_pct",
-    "screener_excluded_sectors",
+    "screener_excluded_sectors", "mv_excluded_sectors",
     "screener_auto_run",
     "screener_schedule_day", "screener_schedule_time",       # legacy (single day/time)
     "screener_schedule_days", "screener_schedule_times",     # Minervini multi-day / multi-time
